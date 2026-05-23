@@ -7,14 +7,14 @@ use leptos_router::*;
 
 use crate::types::{
     ChatMessage, ClientToolCall, MessageBlock, ToolCallStatus,
-    AskQuestionEntry, QuestionResponse, SessionMeta,
+    AskQuestionEntry, QuestionResponse, SessionMeta, ChatSession, PendingConfirm,
 };
+
+#[cfg(feature = "ssr")]
+use crate::types::SessionIndex;
 
 #[cfg(feature = "hydrate")]
 use crate::types::{AnswerPayload, ConfirmPayload};
-
-#[cfg(feature = "ssr")]
-use crate::types::{ChatSession, SessionIndex};
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -208,9 +208,12 @@ fn ToolCallView(
     status: ToolCallStatus,
     canonical_path: Option<String>,
     label: Option<String>,
+    subagent_trajectory_id: Option<String>,
     subagent_blocks: Vec<MessageBlock>,
     on_answer: Callback<(u64, Vec<QuestionResponse>, bool)>,
 ) -> impl IntoView {
+    let _ = id;
+    let _ = &call_id;
     let args_str = serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
 
     // Prefer the human-readable label; fall back to raw tool name.
@@ -371,13 +374,53 @@ fn ToolCallView(
                     </span>
                     {subtitle}
                 </div>
-                // Right: status badge
-                <span class=format!(
-                    "flex-shrink-0 text-[9px] px-2 py-0.5 rounded-full text-white font-bold {}",
-                    badge_bg
-                )>
-                    {badge_text}
-                </span>
+                // Right: status badge & optional view subagent/process button
+                <div class="flex items-center gap-2 flex-shrink-0">
+                    {
+                        let is_sub = name == "START_SUBAGENT" && subagent_trajectory_id.is_some();
+                        let is_proc = name == "RUN_COMMAND";
+                        if is_sub || is_proc {
+                            let btn_text = if is_sub { "View Agent" } else { "View Output" };
+                            #[cfg(feature = "hydrate")]
+                            let name_for_click = name.clone();
+                            #[cfg(feature = "hydrate")]
+                            let call_id_for_click = call_id.clone();
+                            #[cfg(feature = "hydrate")]
+                            let subagent_trajectory_id_for_click = subagent_trajectory_id.clone();
+                            view! {
+                                <button
+                                    class="px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200/50 dark:border-blue-800/30 rounded hover:bg-blue-100/80 dark:hover:bg-blue-900/50 transition-colors"
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        #[cfg(feature = "hydrate")]
+                                        {
+                                            if let Some(win) = web_sys::window() {
+                                                let target_id = if name_for_click == "START_SUBAGENT" {
+                                                    subagent_trajectory_id_for_click.clone()
+                                                } else {
+                                                    Some(call_id_for_click.clone())
+                                                };
+                                                if let Some(sid) = target_id {
+                                                    let _ = win.open_with_url_and_target(&format!("?session={}", sid), "_blank");
+                                                }
+                                            }
+                                        }
+                                    }
+                                >
+                                    {btn_text}
+                                </button>
+                            }.into_any()
+                        } else {
+                            ().into_any()
+                        }
+                    }
+                    <span class=format!(
+                        "flex-shrink-0 text-[9px] px-2 py-0.5 rounded-full text-white font-bold {}",
+                        badge_bg
+                    )>
+                        {badge_text}
+                    </span>
+                </div>
             </summary>
             // Arguments panel — visible when open
             <div class="p-3 text-xs font-mono border-t border-gray-200/40 dark:border-gray-800/30 bg-gray-50/30 dark:bg-[#181818]/10 overflow-x-auto">
@@ -997,30 +1040,49 @@ fn FinishBlockView(structured_output: Option<serde_json::Value>) -> impl IntoVie
 }
 
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HubFilter {
+    Running,
+    Completed,
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HubItemType {
+    Subagent,
+    Process,
+}
+
 #[derive(Clone, PartialEq, Debug)]
-struct SubagentInfo {
-    trajectory_id: String,
-    prompt: String,
+pub struct HubItem {
+    id: String,
+    name: String,
+    item_type: HubItemType,
     status: ToolCallStatus,
     step_count: usize,
     error: Option<String>,
-    subagents: Vec<SubagentInfo>,
+    children: Vec<HubItem>,
 }
 
-fn collect_subagents_recursive(blocks: &[MessageBlock]) -> Vec<SubagentInfo> {
+fn collect_hub_items_recursive(all_blocks: &[MessageBlock], blocks: &[MessageBlock]) -> Vec<HubItem> {
     let mut result = Vec::new();
     for block in blocks {
         if let MessageBlock::ToolCall {
+            call_id,
             name,
             args,
             status,
+            label,
             subagent_trajectory_id,
             subagent_blocks,
             ..
         } = block {
             if name == "START_SUBAGENT" {
                 if let Some(ref traj_id) = subagent_trajectory_id {
-                    let prompt = args["prompt"].as_str().unwrap_or("Unknown Subagent").to_string();
+                    let prompt = args["prompt"].as_str()
+                        .or_else(|| label.as_deref())
+                        .unwrap_or("Unknown Subagent")
+                        .to_string();
                     
                     let mut step_count = 0;
                     let mut error = None;
@@ -1036,27 +1098,86 @@ fn collect_subagents_recursive(blocks: &[MessageBlock]) -> Vec<SubagentInfo> {
                         }
                     }
 
-                    let children = collect_subagents_recursive(subagent_blocks);
+                    let children = collect_hub_items_recursive(all_blocks, subagent_blocks);
                     
-                    result.push(SubagentInfo {
-                        trajectory_id: traj_id.clone(),
-                        prompt,
+                    result.push(HubItem {
+                        id: traj_id.clone(),
+                        name: prompt,
+                        item_type: HubItemType::Subagent,
                         status: status.clone(),
                         step_count,
                         error,
-                        subagents: children,
+                        children,
                     });
                 }
+            } else if name == "RUN_COMMAND" {
+                let cmd_line = args.get("command_line")
+                    .or_else(|| args.get("CommandLine"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("run_command")
+                    .to_string();
+
+                let mut line_count = 0;
+                let mut error = None;
+
+                if let Some(MessageBlock::ToolResult { result: Some(res_val), error: err_opt, .. }) = 
+                    find_tool_result_recursive(all_blocks, call_id) 
+                {
+                    if let Some(err) = err_opt {
+                        error = Some(err.clone());
+                    }
+                    let output = res_val.get("combined_output")
+                        .or_else(|| res_val.get("CombinedOutput"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    line_count = output.lines().count();
+                } else if let Some(MessageBlock::ToolResult { error: Some(err), .. }) = 
+                    find_tool_result_recursive(all_blocks, call_id) 
+                {
+                    error = Some(err.clone());
+                }
+
+                result.push(HubItem {
+                    id: call_id.clone(),
+                    name: cmd_line,
+                    item_type: HubItemType::Process,
+                    status: status.clone(),
+                    step_count: line_count,
+                    error,
+                    children: Vec::new(),
+                });
             } else {
-                result.extend(collect_subagents_recursive(subagent_blocks));
+                result.extend(collect_hub_items_recursive(all_blocks, subagent_blocks));
             }
         }
     }
     result
 }
 
+fn filter_hub_items(items: Vec<HubItem>, filter: HubFilter) -> Vec<HubItem> {
+    let mut filtered = Vec::new();
+    for mut item in items {
+        item.children = filter_hub_items(item.children, filter);
+        
+        let matches = match filter {
+            HubFilter::All => true,
+            HubFilter::Running => {
+                item.status == ToolCallStatus::Running || !item.children.is_empty()
+            }
+            HubFilter::Completed => {
+                matches!(item.status, ToolCallStatus::Done | ToolCallStatus::Error) && item.children.iter().all(|c| matches!(c.status, ToolCallStatus::Done | ToolCallStatus::Error))
+            }
+        };
+        
+        if matches {
+            filtered.push(item);
+        }
+    }
+    filtered
+}
+
 #[component]
-fn SubagentStatusItem(item: SubagentInfo, depth: usize) -> AnyView {
+fn HubStatusItem(item: HubItem, depth: usize) -> AnyView {
     let status_class = match item.status {
         ToolCallStatus::Running => "bg-blue-500/20 text-blue-400 border-blue-500/30",
         ToolCallStatus::Done => "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
@@ -1077,38 +1198,94 @@ fn SubagentStatusItem(item: SubagentInfo, depth: usize) -> AnyView {
         }
     });
 
+    let type_badge = match item.item_type {
+        HubItemType::Subagent => view! {
+            <span class="text-[9px] px-1 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-semibold tracking-wider flex-shrink-0">
+                "AGENT"
+            </span>
+        }.into_any(),
+        HubItemType::Process => view! {
+            <span class="text-[9px] px-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded font-semibold tracking-wider flex-shrink-0">
+                "PROCESS"
+            </span>
+        }.into_any(),
+    };
+
+    let sid = item.id.clone();
+    let on_view = move |ev: leptos::ev::MouseEvent| {
+        ev.stop_propagation();
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(win) = web_sys::window() {
+                let _ = win.open_with_url_and_target(&format!("?session={}", sid), "_blank");
+            }
+        }
+        let _ = sid;
+    };
+
+    let step_label = match item.item_type {
+        HubItemType::Subagent => format!("{} steps", item.step_count),
+        HubItemType::Process => format!("{} lines", item.step_count),
+    };
+
+    let step_icon = match item.item_type {
+        HubItemType::Subagent => view! {
+            <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2" />
+            </svg>
+        }.into_any(),
+        HubItemType::Process => view! {
+            <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+        }.into_any(),
+    };
+
+    let item_id = item.id.clone();
+    let item_name = item.name.clone();
+    let children = item.children.clone();
+
     view! {
         <div class="flex flex-col space-y-1.5" style=format!("padding-left: {}px", depth * 12)>
             <div class="p-3 rounded-lg border border-gray-200/10 bg-white/5 dark:bg-[#202020]/40 backdrop-blur-md shadow-sm transition-all duration-300 hover:border-gray-200/20">
                 <div class="flex items-start justify-between gap-2">
                     <div class="flex flex-col min-w-0">
-                        <span class="text-[10px] text-gray-500 font-mono tracking-wider">
-                            {item.trajectory_id}
-                        </span>
-                        <span class="text-xs text-gray-800 dark:text-gray-200 font-medium truncate mt-0.5 max-w-[200px]">
-                            {item.prompt}
+                        <div class="flex items-center gap-1.5">
+                            {type_badge}
+                            <span class="text-[10px] text-gray-500 font-mono tracking-wider truncate max-w-[120px]">
+                                {item_id}
+                            </span>
+                        </div>
+                        <span class="text-xs text-gray-800 dark:text-gray-200 font-medium mt-1 truncate max-w-[150px]" title=item_name.clone()>
+                            {item_name.clone()}
                         </span>
                     </div>
-                    <span class=format!("text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-wider {}", status_class)>
-                        {status_text}
-                    </span>
+                    <div class="flex flex-col items-end gap-1.5 flex-shrink-0">
+                        <span class=format!("text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-wider {}", status_class)>
+                            {status_text}
+                        </span>
+                        <button
+                            on:click=on_view
+                            class="px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200/55 dark:border-blue-800/35 rounded hover:bg-blue-100/80 dark:hover:bg-blue-900/50 transition-colors"
+                        >
+                            "View"
+                        </button>
+                    </div>
                 </div>
                 
                 <div class="flex items-center gap-3 mt-2 text-[10px] text-gray-500 font-medium">
                     <div class="flex items-center gap-1">
-                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2" />
-                        </svg>
-                        <span>{item.step_count} " steps"</span>
+                        {step_icon}
+                        <span>{step_label}</span>
                     </div>
                 </div>
 
                 {error_view}
             </div>
 
-            {item.subagents.into_iter().map(|child| {
+            {children.into_iter().map(|child| {
                 view! {
-                    <SubagentStatusItem item=child depth=depth + 1 />
+                    <HubStatusItem item=child depth=depth + 1 />
                 }
             }).collect::<Vec<_>>()}
         </div>
@@ -1139,10 +1316,12 @@ fn MessageBlockView(
             status,
             canonical_path,
             label,
+            subagent_trajectory_id,
             subagent_blocks,
             ..
         } => {
             let on_answer_cb = on_answer.clone();
+            let subagent_trajectory_id_cloned = subagent_trajectory_id.clone();
             view! {
                 <ToolCallView
                     id=id
@@ -1152,6 +1331,7 @@ fn MessageBlockView(
                     status=status
                     canonical_path=canonical_path
                     label=label
+                    subagent_trajectory_id=subagent_trajectory_id_cloned
                     subagent_blocks=subagent_blocks
                     on_answer=on_answer_cb
                 />
@@ -1187,14 +1367,6 @@ struct PendingQuestion {
     step_index: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct PendingConfirm {
-    trajectory_id: String,
-    step_index: u32,
-    tool_name: String,
-    // Full tool call so the floating panel can show args without a separate block.
-    tool_call: ClientToolCall,
-}
 
 fn get_current_time() -> u64 {
     #[cfg(feature = "hydrate")]
@@ -1378,6 +1550,55 @@ fn find_and_associate_subagent(blocks: &mut Vec<MessageBlock>, traj_id: &str) ->
 }
 
 #[cfg(feature = "hydrate")]
+fn duplicate_and_associate_subagent(
+    blocks: &mut Vec<MessageBlock>,
+    traj_id: &str,
+    next_id_fn: &dyn Fn() -> u64,
+) -> bool {
+    for i in (0..blocks.len()).rev() {
+        let mut need_duplicate = false;
+        if let MessageBlock::ToolCall {
+            name,
+            subagent_blocks,
+            ..
+        } = &mut blocks[i] {
+            if duplicate_and_associate_subagent(subagent_blocks, traj_id, next_id_fn) {
+                return true;
+            }
+            if name == "START_SUBAGENT" {
+                need_duplicate = true;
+            }
+        }
+        
+        if need_duplicate {
+            if let MessageBlock::ToolCall {
+                call_id,
+                name,
+                args,
+                canonical_path,
+                label,
+                ..
+            } = &blocks[i] {
+                let cloned = MessageBlock::ToolCall {
+                    id: next_id_fn(),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                    canonical_path: canonical_path.clone(),
+                    label: label.clone(),
+                    status: ToolCallStatus::Running,
+                    subagent_trajectory_id: Some(traj_id.to_string()),
+                    subagent_blocks: Vec::new(),
+                };
+                blocks.insert(i + 1, cloned);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "hydrate")]
 fn update_subagent_blocks_impl(
     blocks: &mut Vec<MessageBlock>,
     traj_id: &str,
@@ -1416,21 +1637,28 @@ fn ensure_and_update_subagent_blocks_impl(
     blocks: &mut Vec<MessageBlock>,
     traj_id: &str,
     f: &mut dyn FnMut(&mut Vec<MessageBlock>),
+    next_id_fn: &dyn Fn() -> u64,
 ) {
     let updated = update_subagent_blocks_impl(blocks, traj_id, f);
     if !updated {
         if find_and_associate_subagent(blocks, traj_id) {
+            update_subagent_blocks_impl(blocks, traj_id, f);
+        } else if duplicate_and_associate_subagent(blocks, traj_id, next_id_fn) {
             update_subagent_blocks_impl(blocks, traj_id, f);
         }
     }
 }
 
 #[cfg(feature = "hydrate")]
-fn ensure_and_update_subagent_blocks<F>(blocks: &mut Vec<MessageBlock>, traj_id: &str, mut f: F)
-where
+fn ensure_and_update_subagent_blocks<F>(
+    blocks: &mut Vec<MessageBlock>,
+    traj_id: &str,
+    mut f: F,
+    next_id_fn: &dyn Fn() -> u64,
+) where
     F: FnMut(&mut Vec<MessageBlock>),
 {
-    ensure_and_update_subagent_blocks_impl(blocks, traj_id, &mut f);
+    ensure_and_update_subagent_blocks_impl(blocks, traj_id, &mut f, next_id_fn);
 }
 
 #[cfg(feature = "hydrate")]
@@ -1468,6 +1696,30 @@ fn mark_all_thinking_done(blocks: &mut [MessageBlock]) {
     }
 }
 
+fn get_session_from_url() -> Option<String> {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(win) = web_sys::window() {
+            if let Ok(search) = win.location().search() {
+                if !search.is_empty() {
+                    let clean = search.trim_start_matches('?');
+                    for pair in clean.split('&') {
+                        let mut parts = pair.splitn(2, '=');
+                        if let Some(key) = parts.next() {
+                            if key == "session" {
+                                if let Some(val) = parts.next() {
+                                    return Some(val.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Chat page component
 #[component]
 fn ChatPage() -> impl IntoView {
@@ -1489,10 +1741,13 @@ fn ChatPage() -> impl IntoView {
     let (dark_mode, set_dark_mode) = signal(true);
     let (sidebar_open, set_sidebar_open) = signal(false);
     let (hub_open, set_hub_open) = signal(false);
+    let (hub_filter, set_hub_filter) = signal(HubFilter::Running);
 
     // Monotonic block ID counter
     let (block_id_counter, set_block_id_counter) = signal(0u64);
     let (is_streaming, set_is_streaming) = signal(false);
+    let (blocks_dirty, set_blocks_dirty) = signal(false);
+    let (is_loading_session, set_is_loading_session) = signal(false);
 
     // Accumulating buffers for streaming UI elements
     let (stream_text_buf, set_stream_text_buf) = signal(String::new());
@@ -1512,6 +1767,10 @@ fn ChatPage() -> impl IntoView {
     // Silence SSR unused-variable warnings for signals only read/written inside #[cfg(feature = "hydrate")]
     let _ = &open_folder_input;
     let _ = &set_workspace_path;
+    let _ = &blocks_dirty;
+    let _ = &set_blocks_dirty;
+    let _ = &is_loading_session;
+    let _ = &set_is_loading_session;
 
     // Stored references for SSE connections and listeners to prevent memory leaks and GC
     #[cfg(feature = "hydrate")]
@@ -1558,6 +1817,110 @@ fn ChatPage() -> impl IntoView {
         }
     };
 
+    let active_session_meta = move || {
+        active_session_id.get().and_then(|sid| {
+            sessions.get().iter().find(|s| s.id == sid).cloned()
+        })
+    };
+
+    let active_parent_session_id = move || {
+        active_session_meta().and_then(|meta| meta.parent_session_id)
+    };
+
+    let active_is_process = move || {
+        active_session_meta().and_then(|meta| meta.is_process)
+    };
+
+    let terminal_info = move || {
+        let current_blocks = blocks.get();
+        let mut command = "run_command".to_string();
+        let mut output = String::new();
+        let mut status = "running".to_string();
+        let mut exit_code = None;
+        let mut error = None;
+
+        for b in &current_blocks {
+            match b {
+                MessageBlock::ToolCall { name, args, status: call_status, .. } if name == "RUN_COMMAND" => {
+                    if let Some(cmd) = args.get("command_line").or_else(|| args.get("CommandLine")).and_then(|v| v.as_str()) {
+                        command = cmd.to_string();
+                    }
+                    if *call_status != ToolCallStatus::Running {
+                        status = format!("{:?}", call_status).to_lowercase();
+                    }
+                }
+                MessageBlock::ToolResult { name, result, error: err_opt, .. } if name == "RUN_COMMAND" => {
+                    if let Some(err) = err_opt {
+                        error = Some(err.clone());
+                        status = "failed".to_string();
+                    }
+                    if let Some(res) = result {
+                        if let Some(out) = res.get("combined_output").or_else(|| res.get("CombinedOutput")).and_then(|v| v.as_str()) {
+                            output = out.to_string();
+                        }
+                        if let Some(code) = res.get("exit_code").or_else(|| res.get("ExitCode")).and_then(|v| v.as_i64()) {
+                            exit_code = Some(code);
+                            status = if code == 0 { "completed".to_string() } else { "failed".to_string() };
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (command, output, status, exit_code, error)
+    };
+
+    #[cfg(feature = "hydrate")]
+    {
+        let poll_interval = gloo_timers::callback::Interval::new(1500, move || {
+            let active_parent_id = active_parent_session_id();
+            let has_pending = pending_confirm.get_untracked().is_some();
+            if active_parent_id.is_some() || has_pending {
+                if let Some(sid) = active_session_id.get_untracked() {
+                    spawn_local(async move {
+                        if let Ok(sess) = get_session(sid, false).await {
+                            set_blocks.set(sess.blocks);
+                            set_pending_confirm.set(sess.pending_confirm);
+                        }
+                    });
+                }
+            }
+        });
+
+        let save_interval = gloo_timers::callback::Interval::new(1000, move || {
+            let is_parent = active_parent_session_id().is_none();
+            if is_parent && blocks_dirty.get_untracked() {
+                if let Some(sid) = active_session_id.get_untracked() {
+                    let current_blocks = blocks.get_untracked();
+                    let current_pending = pending_confirm.get_untracked();
+                    set_blocks_dirty.set(false);
+                    spawn_local(async move {
+                        let _ = save_turn_blocks(sid, current_blocks, current_pending).await;
+                    });
+                }
+            }
+        });
+
+        let intervals = StoredValue::new_local(Some(vec![poll_interval, save_interval]));
+        on_cleanup(move || {
+            intervals.set_value(None);
+        });
+    }
+
+    let input_placeholder = move || {
+        if let Some(meta) = active_session_meta() {
+            if meta.parent_session_id.is_some() {
+                if meta.is_process == Some(true) {
+                    return "Viewing Process Output (Inputs Disabled)".to_string();
+                } else {
+                    return "Viewing Subagent Session (Inputs Disabled)".to_string();
+                }
+            }
+        }
+        "Message Antigravity...".to_string()
+    };
+
     // Block ID generator
     let next_id = move || {
         let next = block_id_counter.get_untracked() + 1;
@@ -1581,9 +1944,14 @@ fn ChatPage() -> impl IntoView {
                     #[cfg(not(feature = "hydrate"))]
                     let saved_id: Option<String> = None;
 
-                    // Pick: saved session (if still exists) → first session → create new
-                    let target_id = saved_id
+                    let url_id = get_session_from_url();
+
+                    // Pick: URL session -> saved session (if still exists) → first session → create new
+                    let target_id = url_id
                         .filter(|id| sess_list.iter().any(|s| &s.id == id))
+                        .or_else(|| {
+                            saved_id.filter(|id| sess_list.iter().any(|s| &s.id == id))
+                        })
                         .or_else(|| sess_list.first().map(|s| s.id.clone()));
 
                     if let Some(sid) = target_id {
@@ -1602,9 +1970,42 @@ fn ChatPage() -> impl IntoView {
         });
     };
 
-    // Mount effect: load sessions
+    // Mount effect: load sessions and setup popstate
     Effect::new(move |_| {
         load_sessions();
+
+        #[cfg(feature = "hydrate")]
+        {
+            let set_active_id = set_active_session_id;
+            let event_listener = gloo_events::EventListener::new(&web_sys::window().unwrap(), "popstate", move |_event| {
+                if let Some(url_id) = get_session_from_url() {
+                    set_active_id.set(Some(url_id));
+                }
+            });
+            let listener_store = StoredValue::new_local(Some(event_listener));
+            on_cleanup(move || {
+                listener_store.set_value(None);
+            });
+        }
+    });
+
+    // Push active session ID to the URL when it changes
+    Effect::new(move |_| {
+        if let Some(sid) = active_session_id.get() {
+            #[cfg(feature = "hydrate")]
+            {
+                if let Some(win) = web_sys::window() {
+                    let current_url_id = get_session_from_url();
+                    if current_url_id.as_ref() != Some(&sid) {
+                        if let Ok(history) = win.history() {
+                            let new_url = format!("?session={}", sid);
+                            let _ = history.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&new_url));
+                        }
+                    }
+                }
+            }
+            let _ = sid; // suppress SSR unused-variable warning
+        }
     });
 
     // Persist active session ID to localStorage so we can restore it after a page refresh.
@@ -1649,15 +2050,27 @@ fn ChatPage() -> impl IntoView {
         }
     });
 
+    // Dirty-tracking Effect
+    Effect::new(move |_| {
+        let _ = blocks.get();
+        let _ = pending_confirm.get();
+        if !is_loading_session.get_untracked() {
+            set_blocks_dirty.set(true);
+        }
+    });
+
     // Handle switching between sessions: fetch blocks and set the correct block counter
     Effect::new(move |_| {
         if let Some(sid) = active_session_id.get() {
+            set_is_loading_session.set(true);
+            set_blocks_dirty.set(false);
             let sid_blocks = sid.clone();
             spawn_local(async move {
-                if let Ok(b) = get_session_blocks(sid_blocks).await {
-                    set_blocks.set(b.clone());
+                if let Ok(sess) = get_session(sid_blocks, true).await {
+                    set_blocks.set(sess.blocks.clone());
+                    set_pending_confirm.set(sess.pending_confirm.clone());
                     // Sync monotonic counter to avoid collisions
-                    let max_id = b.iter().map(|block| match block {
+                    let max_id = sess.blocks.iter().map(|block| match block {
                         MessageBlock::UserMessage { id, .. } => *id,
                         MessageBlock::Thinking { id, .. } => *id,
                         MessageBlock::ToolCall { id, .. } => *id,
@@ -1671,6 +2084,14 @@ fn ChatPage() -> impl IntoView {
                         MessageBlock::Error { id, .. } => *id,
                     }).max().unwrap_or(0);
                     set_block_id_counter.set(max_id);
+
+                    #[cfg(feature = "hydrate")]
+                    {
+                        gloo_timers::callback::Timeout::new(100, move || {
+                            set_is_loading_session.set(false);
+                            set_blocks_dirty.set(false);
+                        }).forget();
+                    }
                 }
             });
             // Also sync workspace path from agent server
@@ -1810,10 +2231,11 @@ fn ChatPage() -> impl IntoView {
             set_error_text.set(None);
             set_is_streaming.set(false);
             spawn_local(async move {
-                let _ = save_turn_blocks(sid, Vec::new()).await;
+                let _ = save_turn_blocks(sid, Vec::new(), None).await;
             });
         }
     };
+
 
     // Delete session
     let do_delete_session = move |sid: String| {
@@ -1853,6 +2275,10 @@ fn ChatPage() -> impl IntoView {
 
     // Halt/Cancel streaming
     let on_halt = {
+        #[cfg(feature = "hydrate")]
+        let active_session_id = active_session_id.clone();
+        #[cfg(feature = "hydrate")]
+        let active_parent_session_id = active_parent_session_id.clone();
         move |_| {
             #[cfg(feature = "hydrate")]
             {
@@ -1866,10 +2292,20 @@ fn ChatPage() -> impl IntoView {
             set_is_streaming.set(false);
             #[cfg(feature = "hydrate")]
             {
+                let sess_id = active_session_id.get_untracked().unwrap_or_default();
+                let parent_id = active_parent_session_id();
                 spawn_local(async move {
                     let agent_url = get_agent_server_url();
                     let url = format!("{}/halt", agent_url);
-                    let _ = gloo_net::http::Request::post(&url).send().await;
+                    let body = serde_json::json!({
+                        "session_id": sess_id,
+                        "parent_session_id": parent_id,
+                    });
+                    let _ = gloo_net::http::Request::post(&url)
+                        .json(&body)
+                        .unwrap()
+                        .send()
+                        .await;
                 });
             }
         }
@@ -1894,6 +2330,7 @@ fn ChatPage() -> impl IntoView {
             {
                 let payload = AnswerPayload {
                     session_id: active_session_id.get_untracked().unwrap_or_default(),
+                    parent_session_id: active_parent_session_id(),
                     trajectory_id: pending.trajectory_id,
                     step_index: pending.step_index,
                     responses,
@@ -1934,15 +2371,19 @@ fn ChatPage() -> impl IntoView {
             #[cfg(feature = "hydrate")]
             {
                 let sess_id = active_session_id.get_untracked().unwrap_or_default();
+                let parent_id = active_parent_session_id();
                 let payload = ConfirmPayload {
                     session_id: sess_id.clone(),
-                    trajectory_id: pending.trajectory_id,
+                    parent_session_id: parent_id.clone(),
+                    trajectory_id: pending.trajectory_id.clone(),
                     step_index: pending.step_index,
                     accepted,
                     allow_for_session,
-                    tool_name: Some(pending.tool_name),
+                    tool_name: Some(pending.tool_name.clone()),
                 };
+                let pending_clone = pending.clone();
                 spawn_local(async move {
+                    let _ = resolve_session_confirm_kv(sess_id.clone(), parent_id.clone(), accepted, pending_clone).await;
                     let agent_url = get_agent_server_url();
                     // Send deny/accept to the confirm endpoint.
                     let confirm_url = format!("{}/confirm", agent_url);
@@ -1955,7 +2396,10 @@ fn ChatPage() -> impl IntoView {
                     // instead of continuing after the tool error.
                     if !accepted {
                         let halt_url = format!("{}/halt", agent_url);
-                        let halt_body = serde_json::json!({ "session_id": sess_id });
+                        let halt_body = serde_json::json!({
+                            "session_id": sess_id,
+                            "parent_session_id": parent_id,
+                        });
                         let _ = gloo_net::http::Request::post(&halt_url)
                             .json(&halt_body)
                             .unwrap()
@@ -2030,6 +2474,13 @@ fn ChatPage() -> impl IntoView {
                     use std::rc::Rc;
                     use std::cell::Cell;
                     let stream_completed = Rc::new(Cell::new(false));
+                    // Track whether the parent agent's step stream has ended (idle received).
+                    // When true AND no active subagent trajectories remain, we finalize.
+                    let parent_idle_received = Rc::new(Cell::new(false));
+                    // Set of subagent trajectory IDs that are still actively streaming.
+                    // Populated when we first see events for a new subagent trajectory,
+                    // removed when we receive a 'finish' event for that trajectory.
+                    let active_subagent_trajs = Rc::new(std::cell::RefCell::new(std::collections::HashSet::<String>::new()));
 
                     let main_trajectory_id = Rc::new(std::cell::RefCell::new(Option::<String>::None));
                     let subagents_state = Rc::new(std::cell::RefCell::new(std::collections::HashMap::<String, SubagentStreamState>::new()));
@@ -2038,6 +2489,7 @@ fn ChatPage() -> impl IntoView {
                     let on_token = {
                         let main_trajectory_id = main_trajectory_id.clone();
                         let subagents_state = subagents_state.clone();
+                        let active_subagent_trajs = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2055,6 +2507,8 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            // Register this trajectory as active if first time seen
+                                            active_subagent_trajs.borrow_mut().insert(traj_id.clone());
                                             let mut state_map = subagents_state.borrow_mut();
                                             let sub_state = state_map.entry(traj_id.clone()).or_default();
                                             
@@ -2062,11 +2516,10 @@ fn ChatPage() -> impl IntoView {
                                                 sub_state.current_text_step = data.step_index;
                                                 sub_state.streaming_assistant_id = None;
                                             }
-                                            let mut id_opt = sub_state.streaming_assistant_id;
+                                            let id_opt = sub_state.streaming_assistant_id;
                                             if id_opt.is_none() {
                                                 let new_id = next_id();
                                                 sub_state.streaming_assistant_id = Some(new_id);
-                                                id_opt = Some(new_id);
                                                 set_blocks.update(|bs| {
                                                     ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
                                                         sub_blocks.push(MessageBlock::AssistantMessage {
@@ -2074,11 +2527,11 @@ fn ChatPage() -> impl IntoView {
                                                             content: String::new(),
                                                             timestamp: get_current_time(),
                                                         });
-                                                    });
+                                                    }, &next_id);
                                                 });
                                             }
                                             
-                                            let target_id = id_opt.unwrap();
+                                            let target_id = sub_state.streaming_assistant_id.unwrap();
                                             let text_to_push = data.text.clone();
                                             set_blocks.update(|bs| {
                                                 update_block_by_id_impl(bs, target_id, &mut |b| {
@@ -2120,6 +2573,7 @@ fn ChatPage() -> impl IntoView {
                     let on_thought = {
                         let main_trajectory_id = main_trajectory_id.clone();
                         let subagents_state = subagents_state.clone();
+                        let active_subagent_trajs = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2137,6 +2591,7 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            active_subagent_trajs.borrow_mut().insert(traj_id.clone());
                                             let mut state_map = subagents_state.borrow_mut();
                                             let sub_state = state_map.entry(traj_id.clone()).or_default();
                                             
@@ -2144,11 +2599,10 @@ fn ChatPage() -> impl IntoView {
                                                 sub_state.current_think_step = data.step_index;
                                                 sub_state.streaming_thinking_id = None;
                                             }
-                                            let mut id_opt = sub_state.streaming_thinking_id;
+                                            let id_opt = sub_state.streaming_thinking_id;
                                             if id_opt.is_none() {
                                                 let new_id = next_id();
                                                 sub_state.streaming_thinking_id = Some(new_id);
-                                                id_opt = Some(new_id);
                                                 set_blocks.update(|bs| {
                                                     ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
                                                         sub_blocks.push(MessageBlock::Thinking {
@@ -2156,11 +2610,11 @@ fn ChatPage() -> impl IntoView {
                                                             content: String::new(),
                                                             is_streaming: true,
                                                         });
-                                                    });
+                                                    }, &next_id);
                                                 });
                                             }
                                             
-                                            let target_id = id_opt.unwrap();
+                                            let target_id = sub_state.streaming_thinking_id.unwrap();
                                             let text_to_push = data.text.clone();
                                             set_blocks.update(|bs| {
                                                 update_block_by_id_impl(bs, target_id, &mut |b| {
@@ -2202,6 +2656,7 @@ fn ChatPage() -> impl IntoView {
                     let on_tool_start = {
                         let main_trajectory_id = main_trajectory_id.clone();
                         let subagents_state = subagents_state.clone();
+                        let active_subagent_trajs = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2219,6 +2674,8 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            // Register this trajectory as active if first time seen
+                                            active_subagent_trajs.borrow_mut().insert(traj_id.clone());
                                             let mut state_map = subagents_state.borrow_mut();
                                             let sub_state = state_map.entry(traj_id.clone()).or_default();
                                             
@@ -2244,7 +2701,7 @@ fn ChatPage() -> impl IntoView {
                                                             subagent_trajectory_id: None,
                                                             subagent_blocks: Vec::new(),
                                                         });
-                                                    });
+                                                    }, &next_id);
                                                 });
                                             }
                                         } else {
@@ -2278,6 +2735,7 @@ fn ChatPage() -> impl IntoView {
 
                     let on_tool_result = {
                         let main_trajectory_id = main_trajectory_id.clone();
+                        let active_subagent_trajs_tr = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2295,23 +2753,20 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            active_subagent_trajs_tr.borrow_mut().insert(traj_id.clone());
                                             let call_id_for_search = data.id.clone();
                                             let is_error = data.error.is_some();
                                             
                                             set_blocks.update(|bs| {
-                                                fn update_status_recursive(blocks: &mut Vec<MessageBlock>, cid: &str, err: bool) -> bool {
+                                                fn update_status_recursive(blocks: &mut Vec<MessageBlock>, cid: &str, err: bool) {
                                                     for b in blocks.iter_mut() {
                                                         if let MessageBlock::ToolCall { call_id, ref mut status, subagent_blocks, .. } = b {
                                                             if call_id == cid {
                                                                 *status = if err { ToolCallStatus::Error } else { ToolCallStatus::Done };
-                                                                return true;
                                                             }
-                                                            if update_status_recursive(subagent_blocks, cid, err) {
-                                                                return true;
-                                                            }
+                                                            update_status_recursive(subagent_blocks, cid, err);
                                                         }
                                                     }
-                                                    false
                                                 }
                                                 
                                                 update_status_recursive(bs, &call_id_for_search, is_error);
@@ -2330,19 +2785,20 @@ fn ChatPage() -> impl IntoView {
                                                         result: tool_result.clone(),
                                                         error: tool_error.clone(),
                                                     });
-                                                });
+                                                }, &next_id);
                                             });
                                         } else {
                                             set_blocks.update(|bs| {
-                                                if let Some(MessageBlock::ToolCall { ref mut status, .. }) = bs.iter_mut().find(|b| match b {
-                                                    MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
-                                                    _ => false,
-                                                }) {
-                                                    *status = if data.error.is_some() {
-                                                        ToolCallStatus::Error
-                                                    } else {
-                                                        ToolCallStatus::Done
-                                                    };
+                                                for b in bs.iter_mut() {
+                                                    if let MessageBlock::ToolCall { call_id, ref mut status, .. } = b {
+                                                        if call_id == &data.id {
+                                                            *status = if data.error.is_some() {
+                                                                ToolCallStatus::Error
+                                                            } else {
+                                                                ToolCallStatus::Done
+                                                            };
+                                                        }
+                                                    }
                                                 }
                                                 let res_id = next_id();
                                                 bs.push(MessageBlock::ToolResult {
@@ -2363,6 +2819,7 @@ fn ChatPage() -> impl IntoView {
 
                     let on_question = {
                         let main_trajectory_id = main_trajectory_id.clone();
+                        let active_subagent_trajs_q = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2382,6 +2839,7 @@ fn ChatPage() -> impl IntoView {
                                         let qs = data.questions.clone();
 
                                         if is_subagent {
+                                            active_subagent_trajs_q.borrow_mut().insert(data.trajectory_id.clone());
                                             set_blocks.update(|bs| {
                                                 ensure_and_update_subagent_blocks(bs, &data.trajectory_id, move |sub_blocks| {
                                                     sub_blocks.push(MessageBlock::Question {
@@ -2391,7 +2849,7 @@ fn ChatPage() -> impl IntoView {
                                                         questions: qs.clone(),
                                                         answered: false,
                                                     });
-                                                });
+                                                }, &next_id);
                                             });
                                         } else {
                                             set_blocks.update(|bs| bs.push(MessageBlock::Question {
@@ -2451,6 +2909,7 @@ fn ChatPage() -> impl IntoView {
 
                     let on_compaction = {
                         let main_trajectory_id = main_trajectory_id.clone();
+                        let active_subagent_trajs_comp = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2468,6 +2927,7 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            active_subagent_trajs_comp.borrow_mut().insert(traj_id.clone());
                                             let new_id = next_id();
                                             let step_index = data.step_index;
                                             set_blocks.update(|bs| {
@@ -2476,7 +2936,7 @@ fn ChatPage() -> impl IntoView {
                                                         id: new_id,
                                                         step_index,
                                                     });
-                                                });
+                                                }, &next_id);
                                             });
                                         } else {
                                             let id = next_id();
@@ -2497,6 +2957,7 @@ fn ChatPage() -> impl IntoView {
                     // thinking panel from remaining 'open' while the tool result comes in.
                     let on_status = {
                         let main_trajectory_id = main_trajectory_id.clone();
+                        let active_subagent_trajs_st = active_subagent_trajs.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2514,6 +2975,7 @@ fn ChatPage() -> impl IntoView {
 
                                         if is_subagent {
                                             let traj_id = data.trajectory_id.clone().unwrap();
+                                            active_subagent_trajs_st.borrow_mut().insert(traj_id.clone());
                                             if data.status == "DONE" || data.status == "ERROR" {
                                                 set_blocks.update(|bs| {
                                                     update_subagent_blocks(bs, &traj_id, |sub_blocks| {
@@ -2540,8 +3002,71 @@ fn ChatPage() -> impl IntoView {
                         }
                     };
 
+                    // Helper: finalise the stream — mark thinking done, clear flags, save to KV.
+                    // Called by 'idle', 'done', or 'on_finish' (deferred). Idempotent:
+                    // Rc<Cell<bool>> guards against double-execution.
+                    let stream_completed_fin = stream_completed.clone();
+                    let set_sessions2 = set_sessions;
+                    let do_finalize = Rc::new(move || {
+                        if stream_completed_fin.get() {
+                            return; // Already finalized
+                        }
+                        stream_completed_fin.set(true);
+
+                        set_blocks.update(|bs| {
+                            mark_all_thinking_done(bs);
+                        });
+                        set_is_streaming.set(false);
+                        set_stream_text_buf.set(String::new());
+                        set_stream_think_buf.set(String::new());
+                        // Reset user-scroll-up flag so the next response auto-scrolls again
+                        #[cfg(feature = "hydrate")]
+                        { let _ = js_sys::eval("window.__userScrolledUp = false;"); }
+                        let session_id = active_session_id.get_untracked().unwrap_or_default();
+                        let all_blocks = blocks.get_untracked();
+                        let current_pending = pending_confirm.get_untracked();
+                        let set_sessions3 = set_sessions2;
+                        // Snapshot local titles before async save so user-renames survive the
+                        // KV round-trip (rename_session and save_turn_blocks can race).
+                        let local_titles: std::collections::HashMap<String, String> =
+                            sessions.get_untracked()
+                                .into_iter()
+                                .map(|s| (s.id, s.title))
+                                .collect();
+                        spawn_local(async move {
+                            let _ = save_turn_blocks(session_id, all_blocks, current_pending).await;
+                            // Refresh sidebar so the auto-generated title appears after the
+                            // first message, but DO NOT overwrite a user-renamed title.
+                            if let Ok(mut updated) = list_sessions().await {
+                                for meta in &mut updated {
+                                    if let Some(local) = local_titles.get(&meta.id) {
+                                        // If the user renamed it (local ≠ "New Chat") AND the
+                                        // server still shows the same old value or "New Chat",
+                                        // keep the local rename.  If the server has a brand-new
+                                        // different value (e.g. it was saved by a concurrent
+                                        // rename call that already completed), trust the server.
+                                        if local != "New Chat" && meta.title == *local {
+                                            // Server agrees — nothing to do.
+                                        } else if local != "New Chat" && meta.title == "New Chat" {
+                                            // Server hasn't caught up — keep local rename.
+                                            meta.title = local.clone();
+                                        }
+                                        // Otherwise (server has a fresh value) trust the server.
+                                    }
+                                }
+                                set_sessions3.set(updated);
+                            }
+                        });
+                    });
+
                     let on_finish = {
                         let main_trajectory_id = main_trajectory_id.clone();
+                        let active_subagent_trajs = active_subagent_trajs.clone();
+                        let parent_idle_received = parent_idle_received.clone();
+                        let stream_completed_finish = stream_completed.clone();
+                        let do_finalize_finish = do_finalize.clone();
+                        let active_es_finish = active_es;
+                        let active_listeners_finish = active_listeners;
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -2567,8 +3092,26 @@ fn ChatPage() -> impl IntoView {
                                                         id: new_id,
                                                         structured_output: struct_out.clone(),
                                                     });
-                                                });
+                                                }, &next_id);
                                             });
+
+                                            // Mark this subagent trajectory as finished
+                                            active_subagent_trajs.borrow_mut().remove(&traj_id);
+
+                                            // If the parent already sent idle AND all subagents
+                                            // are now finished, perform deferred finalization.
+                                            if parent_idle_received.get()
+                                                && active_subagent_trajs.borrow().is_empty()
+                                                && !stream_completed_finish.get()
+                                            {
+                                                do_finalize_finish();
+                                                active_es_finish.update_value(|opt_es| {
+                                                    if let Some(es) = opt_es.take() {
+                                                        es.close();
+                                                    }
+                                                });
+                                                active_listeners_finish.set_value(None);
+                                            }
                                         } else {
                                             let id = next_id();
                                             set_blocks.update(|bs| bs.push(MessageBlock::Finish {
@@ -2582,69 +3125,24 @@ fn ChatPage() -> impl IntoView {
                         }
                     };
 
-                    // Helper: finalise the stream — mark thinking done, clear flags, save to KV.
-                    // Called by either 'idle' or 'done'. Idempotent: Rc<Cell<bool>> guards
-                    // against double-execution.
-                    let stream_completed_fin = stream_completed.clone();
-                    let set_sessions2 = set_sessions;
-                    let do_finalize = Rc::new(move || {
-                        if stream_completed_fin.get() {
-                            return; // Already finalized
-                        }
-                        stream_completed_fin.set(true);
-
-                        set_blocks.update(|bs| {
-                            mark_all_thinking_done(bs);
-                        });
-                        set_is_streaming.set(false);
-                        set_stream_text_buf.set(String::new());
-                        set_stream_think_buf.set(String::new());
-                        // Reset user-scroll-up flag so the next response auto-scrolls again
-                        #[cfg(feature = "hydrate")]
-                        { let _ = js_sys::eval("window.__userScrolledUp = false;"); }
-
-                        let session_id = active_session_id.get_untracked().unwrap_or_default();
-                        let all_blocks = blocks.get_untracked();
-                        let set_sessions3 = set_sessions2;
-                        // Snapshot local titles before async save so user-renames survive the
-                        // KV round-trip (rename_session and save_turn_blocks can race).
-                        let local_titles: std::collections::HashMap<String, String> =
-                            sessions.get_untracked()
-                                .into_iter()
-                                .map(|s| (s.id, s.title))
-                                .collect();
-                        spawn_local(async move {
-                            let _ = save_turn_blocks(session_id, all_blocks).await;
-                            // Refresh sidebar so the auto-generated title appears after the
-                            // first message, but DO NOT overwrite a user-renamed title.
-                            if let Ok(mut updated) = list_sessions().await {
-                                for meta in &mut updated {
-                                    if let Some(local) = local_titles.get(&meta.id) {
-                                        // If the user renamed it (local ≠ "New Chat") AND the
-                                        // server still shows the same old value or "New Chat",
-                                        // keep the local rename.  If the server has a brand-new
-                                        // different value (e.g. it was saved by a concurrent
-                                        // rename call that already completed), trust the server.
-                                        if local != "New Chat" && meta.title == *local {
-                                            // Server agrees — nothing to do.
-                                        } else if local != "New Chat" && meta.title == "New Chat" {
-                                            // Server hasn't caught up — keep local rename.
-                                            meta.title = local.clone();
-                                        }
-                                        // Otherwise (server has a fresh value) trust the server.
-                                    }
-                                }
-                                set_sessions3.set(updated);
-                            }
-                        });
-                    });
 
                     // 'idle' fires just before 'done' — use it as the primary completion trigger
                     // so we finalise as soon as possible, reducing any timing gap.
                     let do_finalize_idle = do_finalize.clone();
                     let active_es_idle = active_es;
                     let active_listeners_idle = active_listeners;
+                    let parent_idle_received_idle = parent_idle_received.clone();
+                    let active_subagent_trajs_idle = active_subagent_trajs.clone();
                     let on_idle = move |_event: &web_sys::Event| {
+                        // Record that the parent agent's step stream has ended.
+                        parent_idle_received_idle.set(true);
+
+                        // If subagents are still running, defer finalization —
+                        // on_finish will close the stream when the last one completes.
+                        if !active_subagent_trajs_idle.borrow().is_empty() {
+                            return;
+                        }
+
                         do_finalize_idle();
                         // Close the EventSource so the browser doesn't keep the connection open.
                         active_es_idle.update_value(|opt_es| {
@@ -2658,9 +3156,14 @@ fn ChatPage() -> impl IntoView {
                     let active_es_done = active_es;
                     let active_listeners_done = active_listeners;
                     let do_finalize_done = do_finalize.clone();
+                    let active_subagent_trajs_done = active_subagent_trajs.clone();
                     let on_done = move |_event: &web_sys::Event| {
                         // Do NOT close if a confirm is still pending.
                         if pending_confirm.get_untracked().is_some() {
+                            return;
+                        }
+                        // Do NOT close if subagents are still running.
+                        if !active_subagent_trajs_done.borrow().is_empty() {
                             return;
                         }
                         do_finalize_done(); // idempotent
@@ -2945,6 +3448,9 @@ fn ChatPage() -> impl IntoView {
     };
 
     let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if active_parent_session_id().is_some() {
+            return;
+        }
         if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             do_send();
@@ -3025,7 +3531,7 @@ fn ChatPage() -> impl IntoView {
                         "Recent"
                     </div>
                     <For
-                        each=move || sessions.get()
+                        each=move || { sessions.get().into_iter().filter(|s| s.parent_session_id.is_none()).collect::<Vec<_>>() }
                         key=|sess| sess.id.clone()
                         let:sess
                     >
@@ -3263,301 +3769,387 @@ fn ChatPage() -> impl IntoView {
                         </div>
                     </header>
 
-                // Messages Viewport
-                <div class="flex-1 overflow-y-auto" id="chat-messages-container" node_ref=messages_container_ref>
-                    // Empty State
-                    <Show when=move || blocks.get().is_empty() && !is_streaming.get()>
-                        <div class="max-w-3xl mx-auto w-full px-4 h-full flex flex-col items-center justify-center text-center py-20">
-                            <h2 class="text-[#0d0d0d] dark:text-white text-3xl font-semibold mb-8 tracking-tight">
-                                "What's on the agenda today?"
-                            </h2>
+                <Show
+                    when=move || active_is_process().unwrap_or(false)
+                    fallback=move || view! {
+                        <div class="flex-1 flex flex-col overflow-hidden">
+                            // Messages Viewport
+                            <div class="flex-1 overflow-y-auto" id="chat-messages-container" node_ref=messages_container_ref>
+                                // Empty State
+                                <Show when=move || blocks.get().is_empty() && !is_streaming.get()>
+                                    <div class="max-w-3xl mx-auto w-full px-4 h-full flex flex-col items-center justify-center text-center py-20">
+                                        <h2 class="text-[#0d0d0d] dark:text-white text-3xl font-semibold mb-8 tracking-tight">
+                                            "What's on the agenda today?"
+                                        </h2>
 
-                            // Prompt Pills
-                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl px-4">
-                                <button
-                                    on:click=move |_| {
-                                        set_input_text.set("Search the codebase for all usages of `unsafe` blocks.".to_string());
-                                        if let Some(el) = textarea_ref.get() {
-                                            el.set_value("Search the codebase for all usages of `unsafe` blocks.");
-                                            let _ = el.focus();
-                                        }
-                                    }
-                                    class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
-                                >
-                                    <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
-                                        "Audit Codebase"
-                                    </div>
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
-                                        "Search the codebase for all usages of `unsafe` blocks."
-                                    </div>
-                                </button>
+                                        // Prompt Pills
+                                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl px-4">
+                                            <button
+                                                on:click=move |_| {
+                                                    set_input_text.set("Search the codebase for all usages of `unsafe` blocks.".to_string());
+                                                    if let Some(el) = textarea_ref.get() {
+                                                        el.set_value("Search the codebase for all usages of `unsafe` blocks.");
+                                                        let _ = el.focus();
+                                                    }
+                                                }
+                                                class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
+                                            >
+                                                <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
+                                                    "Audit Codebase"
+                                                </div>
+                                                <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+                                                    "Search the codebase for all usages of `unsafe` blocks."
+                                                </div>
+                                            </button>
 
-                                <button
-                                    on:click=move |_| {
-                                        set_input_text.set("Run the tests and explain any failures.".to_string());
-                                        if let Some(el) = textarea_ref.get() {
-                                            el.set_value("Run the tests and explain any failures.");
-                                            let _ = el.focus();
-                                        }
-                                    }
-                                    class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
-                                >
-                                    <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
-                                        "Test Suite"
-                                    </div>
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
-                                        "Run the tests and explain any failures."
-                                    </div>
-                                </button>
+                                            <button
+                                                on:click=move |_| {
+                                                    set_input_text.set("Run the tests and explain any failures.".to_string());
+                                                    if let Some(el) = textarea_ref.get() {
+                                                        el.set_value("Run the tests and explain any failures.");
+                                                        let _ = el.focus();
+                                                    }
+                                                }
+                                                class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
+                                            >
+                                                <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
+                                                    "Test Suite"
+                                                </div>
+                                                <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+                                                    "Run the tests and explain any failures."
+                                                </div>
+                                            </button>
 
-                                <button
-                                    on:click=move |_| {
-                                        set_input_text.set("Write a migration guide from Leptos 0.6 to 0.8.".to_string());
-                                        if let Some(el) = textarea_ref.get() {
-                                            el.set_value("Write a migration guide from Leptos 0.6 to 0.8.");
-                                            let _ = el.focus();
-                                        }
-                                    }
-                                    class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
-                                >
-                                    <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
-                                        "Technical Writing"
-                                    </div>
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
-                                        "Write a migration guide from Leptos 0.6 to 0.8."
-                                    </div>
-                                </button>
-                            </div>
-                        </div>
-                    </Show>
-
-                    // Active Conversation Messages (unified blocks timeline)
-                    <div class="max-w-3xl mx-auto w-full px-4 py-8 flex flex-col gap-8">
-                        // Direct reactive iteration: re-evaluates on every `blocks` update.
-                        // We intentionally do NOT use <For key=id> here because streaming
-                        // mutates block content (tokens appending, is_streaming toggling) without
-                        // changing the id key — which would cause <For> to reuse stale DOM nodes.
-                        // Chat conversations have a small number of blocks so full re-render is fine.
-                        // Filter out short AssistantMessages that match a tool label
-                        // (the agent emits e.g. "Change Directory" as both a text step
-                        // and as the step.content for the ToolCall — we use it as the
-                        // card title and suppress the redundant standalone bubble).
-                        {move || {
-                            let mut all_blocks = blocks.get();
-                            // Reorder: ensure Thinking blocks appear before adjacent
-                            // AssistantMessage blocks.  The server may emit text tokens
-                            // before thinking deltas for the same step, causing
-                            // AssistantMessage to be pushed before Thinking in the vec.
-                            {
-                                let mut i = 1;
-                                while i < all_blocks.len() {
-                                    if matches!(all_blocks[i], MessageBlock::Thinking { .. })
-                                        && matches!(all_blocks[i - 1], MessageBlock::AssistantMessage { .. })
-                                    {
-                                        all_blocks.swap(i - 1, i);
-                                    }
-                                    i += 1;
-                                }
-                            }
-                            // Collect all non-empty short labels from ToolCall blocks
-                            let tool_labels: std::collections::HashSet<String> = all_blocks.iter()
-                                .filter_map(|b| match b {
-                                    MessageBlock::ToolCall { label, .. } => {
-                                        label.as_ref()
-                                            .map(|l| l.trim().to_lowercase())
-                                            .filter(|l| !l.is_empty() && l.len() < 60)
-                                    }
-                                    _ => None,
-                                })
-                                .collect();
-                            all_blocks.into_iter()
-                                .filter(|block| match block {
-                                    // Hide short AssistantMessages whose text is used
-                                    // as a tool card label — they'd be redundant.
-                                    MessageBlock::AssistantMessage { content, .. } => {
-                                        let t = content.trim().to_lowercase();
-                                        !(t.len() < 60 && tool_labels.contains(&t))
-                                    }
-                                    _ => true,
-                                })
-                                .map(|block| view! {
-                                    <MessageBlockView block=block.clone() on_answer=on_answer />
-                                })
-                                .collect_view()
-                        }}
-
-                        // Bouncing dots loading indicator
-                        <Show when=move || {
-                            is_streaming.get() && !blocks.get().iter().any(|b| {
-                                matches!(b, MessageBlock::Thinking { .. } | MessageBlock::AssistantMessage { .. } | MessageBlock::ToolCall { .. })
-                            })
-                        }>
-                            <div class="flex w-full gap-4 justify-start">
-                                <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-black dark:bg-white text-white dark:text-black select-none">
-                                    "A"
-                                </div>
-                                <div class="flex flex-col items-start max-w-[85%] w-full">
-                                    <div class="text-[11px] text-gray-400 dark:text-gray-500 mb-1 font-medium select-none">
-                                        "Agent"
-                                    </div>
-                                    <div class="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
-                                        <div class="flex gap-1 py-1">
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 0ms"></div>
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 150ms"></div>
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                                            <button
+                                                on:click=move |_| {
+                                                    set_input_text.set("Write a migration guide from Leptos 0.6 to 0.8.".to_string());
+                                                    if let Some(el) = textarea_ref.get() {
+                                                        el.set_value("Write a migration guide from Leptos 0.6 to 0.8.");
+                                                        let _ = el.focus();
+                                                    }
+                                                }
+                                                class="p-4 rounded-2xl border border-[#e5e5e7] dark:border-[#2f2f2f] text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm"
+                                            >
+                                                <div class="font-medium text-gray-800 dark:text-gray-200 mb-1">
+                                                    "Technical Writing"
+                                                </div>
+                                                <div class="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+                                                    "Write a migration guide from Leptos 0.6 to 0.8."
+                                                </div>
+                                            </button>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                        </Show>
+                                </Show>
 
-                        // Error toast formatted beautifully
-                        <Show when=move || error_text.get().is_some()>
-                            <div class="flex w-full gap-4 justify-start">
-                                <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-red-600 text-white select-none">
-                                    "E"
-                                </div>
-                                <div class="flex flex-col items-start max-w-[85%]">
-                                    <div class="text-[11px] text-red-500 mb-1 font-medium select-none">
-                                        "Error"
-                                    </div>
-                                    <div class="bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 rounded-2xl px-4 py-2.5 text-sm text-red-800 dark:text-red-200 whitespace-pre-wrap">
-                                        {move || error_text.get().unwrap_or_default()}
-                                    </div>
-                                </div>
-                            </div>
-                        </Show>
-                    </div>
-                </div>
+                                // Active Conversation Messages (unified blocks timeline)
+                                <div class="max-w-3xl mx-auto w-full px-4 py-8 flex flex-col gap-8">
+                                    // Direct reactive iteration: re-evaluates on every `blocks` update.
+                                    // We intentionally do NOT use <For key=id> here because streaming
+                                    // mutates block content (tokens appending, is_streaming toggling) without
+                                    // changing the id key — which would cause <For> to reuse stale DOM nodes.
+                                    // Chat conversations have a small number of blocks so full re-render is fine.
+                                    // Filter out short AssistantMessages that match a tool label
+                                    // (the agent emits e.g. "Change Directory" as both a text step
+                                    // and as the step.content for the ToolCall — we use it as the
+                                    // card title and suppress the redundant standalone bubble).
+                                    {move || {
+                                        let mut all_blocks = blocks.get();
+                                        // Reorder: ensure Thinking blocks appear before adjacent
+                                        // AssistantMessage blocks.  The server may emit text tokens
+                                        // before thinking deltas for the same step, causing
+                                        // AssistantMessage to be pushed before Thinking in the vec.
+                                        {
+                                            let mut i = 1;
+                                            while i < all_blocks.len() {
+                                                if matches!(all_blocks[i], MessageBlock::Thinking { .. })
+                                                    && matches!(all_blocks[i - 1], MessageBlock::AssistantMessage { .. })
+                                                {
+                                                    all_blocks.swap(i - 1, i);
+                                                }
+                                                i += 1;
+                                            }
+                                        }
+                                        // Collect all non-empty short labels from ToolCall blocks
+                                        let tool_labels: std::collections::HashSet<String> = all_blocks.iter()
+                                            .filter_map(|b| match b {
+                                                MessageBlock::ToolCall { label, .. } => {
+                                                    label.as_ref()
+                                                        .map(|l| l.trim().to_lowercase())
+                                                        .filter(|l| !l.is_empty() && l.len() < 60)
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        all_blocks.into_iter()
+                                            .filter(|block| match block {
+                                                // Hide short AssistantMessages whose text is used
+                                                // as a tool card label — they'd be redundant.
+                                                MessageBlock::AssistantMessage { content, .. } => {
+                                                    let t = content.trim().to_lowercase();
+                                                    !(t.len() < 60 && tool_labels.contains(&t))
+                                                }
+                                                _ => true,
+                                            })
+                                            .map(|block| view! {
+                                                <MessageBlockView block=block.clone() on_answer=on_answer />
+                                            })
+                                            .collect_view()
+                                    }}
 
-                // Bottom Input Area
-                <div class="border-t border-[#e5e5e7] dark:border-[#2f2f2f] bg-white dark:bg-[#212121] py-4">
-                    <div class="max-w-3xl mx-auto w-full px-4">
-
-                        // ── Floating Permission Panel ──────────────────────────────
-                        // Shown above the input when the agent requests a confirmation.
-                        // Replaces the old inline-in-chat pending card. Dismissed
-                        // automatically when the user accepts or denies.
-                        <Show when=move || pending_confirm.get().is_some()>
-                            {move || {
-                                if let Some(ref pc) = pending_confirm.get() {
-                                    let tool_name = pc.tool_call.name.clone();
-                                    let args_str = serde_json::to_string_pretty(&pc.tool_call.args)
-                                        .unwrap_or_else(|_| pc.tool_call.args.to_string());
-                                    let path_display = pc.tool_call.canonical_path.as_deref()
-                                        .map(shorten_path);
-                                    let on_confirm_deny = on_confirm;
-                                    let on_confirm_once = on_confirm;
-                                    let on_confirm_sess = on_confirm;
-                                    view! {
-                                        <div class="mb-3 animate-in slide-in-from-bottom-2 duration-200">
-                                            <div class="border border-amber-300 dark:border-amber-700/50 bg-amber-50 dark:bg-amber-950/20 rounded-2xl shadow-lg overflow-hidden">
-                                                // Header
-                                                <div class="flex items-center gap-2 px-4 py-2.5 bg-amber-100/80 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/30">
-                                                    <span class="text-sm">{"🔒"}</span>
-                                                    <span class="font-bold text-xs uppercase tracking-wide text-amber-800 dark:text-amber-300">{"Permission Required"}</span>
-                                                    <span class="ml-1 font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-200 dark:bg-amber-800/40 text-amber-900 dark:text-amber-200 uppercase font-bold">
-                                                        {tool_name}
-                                                    </span>
-                                                    {path_display.map(|p| view! {
-                                                        <span class="font-mono text-[10px] opacity-60 truncate max-w-[220px]">{p}</span>
-                                                    })}
+                                    // Bouncing dots loading indicator
+                                    <Show when=move || {
+                                        is_streaming.get() && !blocks.get().iter().any(|b| {
+                                            matches!(b, MessageBlock::Thinking { .. } | MessageBlock::AssistantMessage { .. } | MessageBlock::ToolCall { .. })
+                                        })
+                                    }>
+                                        <div class="flex w-full gap-4 justify-start">
+                                            <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-black dark:bg-white text-white dark:text-black select-none">
+                                                "A"
+                                            </div>
+                                            <div class="flex flex-col items-start max-w-[85%] w-full">
+                                                <div class="text-[11px] text-gray-400 dark:text-gray-500 mb-1 font-medium select-none">
+                                                    "Agent"
                                                 </div>
-                                                // Args preview
-                                                <div class="px-4 py-2.5">
-                                                    <pre class="text-[11px] font-mono text-gray-600 dark:text-gray-400 overflow-x-auto max-h-[80px] whitespace-pre">
-                                                        {args_str}
-                                                    </pre>
-                                                </div>
-                                                // Actions
-                                                <div class="flex items-center justify-between gap-2 px-4 py-2.5 border-t border-amber-200/60 dark:border-amber-800/30 bg-amber-50/50 dark:bg-amber-950/10">
-                                                    <button
-                                                        on:click=move |_| on_confirm_deny.run((false, false))
-                                                        class="px-4 py-1.5 rounded-lg text-xs font-semibold border border-red-200 dark:border-red-800/40 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 dark:text-red-400 transition-colors"
-                                                    >
-                                                        {"Deny"}
-                                                    </button>
-                                                    <div class="flex items-center gap-2">
-                                                        <button
-                                                            on:click=move |_| on_confirm_once.run((true, false))
-                                                            class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white shadow transition-colors"
-                                                        >
-                                                            {"Allow Once"}
-                                                        </button>
-                                                        <button
-                                                            on:click=move |_| on_confirm_sess.run((true, true))
-                                                            class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow transition-colors"
-                                                        >
-                                                            {"Allow for Session"}
-                                                        </button>
+                                                <div class="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
+                                                    <div class="flex gap-1 py-1">
+                                                        <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                                                        <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                                                        <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 300ms"></div>
                                                     </div>
                                                 </div>
                                             </div>
                                         </div>
-                                    }.into_any()
-                                } else {
-                                    ().into_any()
-                                }
-                            }}
-                        </Show>
+                                    </Show>
 
-                        <div class="relative flex items-end bg-[#f4f4f4] dark:bg-[#2f2f2f] rounded-3xl p-2 border border-transparent focus-within:border-gray-300 dark:focus-within:border-gray-700 transition-colors">
-                            <textarea
-                                node_ref=textarea_ref
-                                prop:value=move || input_text.get()
-                                on:input=move |ev| {
-                                    set_input_text.set(event_target_value(&ev));
-                                    #[cfg(feature = "hydrate")]
-                                    {
-                                        use wasm_bindgen::JsCast;
-                                        if let Some(target) = ev.target() {
-                                            if let Ok(el) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
-                                                if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
-                                                    let _ = web_sys::HtmlElement::style(html_el).set_property("height", "auto");
-                                                    let scroll_height = el.scroll_height();
-                                                    let _ = web_sys::HtmlElement::style(html_el).set_property("height", &format!("{scroll_height}px"));
+                                    // Error toast formatted beautifully
+                                    <Show when=move || error_text.get().is_some()>
+                                        <div class="flex w-full gap-4 justify-start">
+                                            <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-red-600 text-white select-none">
+                                                "E"
+                                            </div>
+                                            <div class="flex flex-col items-start max-w-[85%]">
+                                                <div class="text-[11px] text-red-500 mb-1 font-medium select-none">
+                                                    "Error"
+                                                </div>
+                                                <div class="bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 rounded-2xl px-4 py-2.5 text-sm text-red-800 dark:text-red-200 whitespace-pre-wrap">
+                                                    {move || error_text.get().unwrap_or_default()}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </Show>
+                                </div>
+                            </div>
+
+                            // Bottom Input Area
+                            <div class="border-t border-[#e5e5e7] dark:border-[#2f2f2f] bg-white dark:bg-[#212121] py-4">
+                                <div class="max-w-3xl mx-auto w-full px-4">
+
+                                    // ── Floating Permission Panel ──────────────────────────────
+                                    // Shown above the input when the agent requests a confirmation.
+                                    // Replaces the old inline-in-chat pending card. Dismissed
+                                    // automatically when the user accepts or denies.
+                                    <Show when=move || pending_confirm.get().is_some()>
+                                        {move || {
+                                            if let Some(ref pc) = pending_confirm.get() {
+                                                let tool_name = pc.tool_call.name.clone();
+                                                let args_str = serde_json::to_string_pretty(&pc.tool_call.args)
+                                                    .unwrap_or_else(|_| pc.tool_call.args.to_string());
+                                                let path_display = pc.tool_call.canonical_path.as_deref()
+                                                    .map(shorten_path);
+                                                let on_confirm_deny = on_confirm;
+                                                let on_confirm_once = on_confirm;
+                                                let on_confirm_sess = on_confirm;
+                                                view! {
+                                                    <div class="mb-3 animate-in slide-in-from-bottom-2 duration-200">
+                                                        <div class="border border-amber-300 dark:border-amber-700/50 bg-amber-50 dark:bg-amber-950/20 rounded-2xl shadow-lg overflow-hidden">
+                                                            // Header
+                                                            <div class="flex items-center gap-2 px-4 py-2.5 bg-amber-100/80 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/30">
+                                                                <span class="text-sm">{"🔒"}</span>
+                                                                <span class="font-bold text-xs uppercase tracking-wide text-amber-800 dark:text-amber-300">{"Permission Required"}</span>
+                                                                <span class="ml-1 font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-200 dark:bg-amber-800/40 text-amber-900 dark:text-amber-200 uppercase font-bold">
+                                                                    {tool_name}
+                                                                </span>
+                                                                {path_display.map(|p| view! {
+                                                                    <span class="font-mono text-[10px] opacity-60 truncate max-w-[220px]">{p}</span>
+                                                                })}
+                                                            </div>
+                                                            // Args preview
+                                                            <div class="px-4 py-2.5">
+                                                                <pre class="text-[11px] font-mono text-gray-600 dark:text-gray-400 overflow-x-auto max-h-[80px] whitespace-pre">
+                                                                    {args_str}
+                                                                </pre>
+                                                            </div>
+                                                            // Actions
+                                                            <div class="flex items-center justify-between gap-2 px-4 py-2.5 border-t border-amber-200/60 dark:border-amber-800/30 bg-amber-50/50 dark:bg-amber-950/10">
+                                                                <button
+                                                                    on:click=move |_| on_confirm_deny.run((false, false))
+                                                                    class="px-4 py-1.5 rounded-lg text-xs font-semibold border border-red-200 dark:border-red-800/40 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 dark:text-red-400 transition-colors"
+                                                                >
+                                                                    {"Deny"}
+                                                                </button>
+                                                                <div class="flex items-center gap-2">
+                                                                    <button
+                                                                        on:click=move |_| on_confirm_once.run((true, false))
+                                                                        class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white shadow transition-colors"
+                                                                    >
+                                                                        {"Allow Once"}
+                                                                    </button>
+                                                                    <button
+                                                                        on:click=move |_| on_confirm_sess.run((true, true))
+                                                                        class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow transition-colors"
+                                                                    >
+                                                                        {"Allow for Session"}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                }.into_any()
+                                            } else {
+                                                ().into_any()
+                                            }
+                                        }}
+                                    </Show>
+
+                                    <div class=move || format!(
+                                        "relative flex items-end bg-[#f4f4f4] dark:bg-[#2f2f2f] rounded-3xl p-2 border border-transparent focus-within:border-gray-300 dark:focus-within:border-gray-700 transition-colors {}",
+                                        if active_parent_session_id().is_some() { "opacity-60 cursor-not-allowed" } else { "" }
+                                    )>
+                                        <textarea
+                                            node_ref=textarea_ref
+                                            prop:value=move || input_text.get()
+                                            disabled=move || active_parent_session_id().is_some()
+                                            on:input=move |ev| {
+                                                set_input_text.set(event_target_value(&ev));
+                                                #[cfg(feature = "hydrate")]
+                                                {
+                                                    use wasm_bindgen::JsCast;
+                                                    if let Some(target) = ev.target() {
+                                                        if let Ok(el) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                                                            if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
+                                                                let _ = web_sys::HtmlElement::style(html_el).set_property("height", "auto");
+                                                                let scroll_height = el.scroll_height();
+                                                                let _ = web_sys::HtmlElement::style(html_el).set_property("height", &format!("{scroll_height}px"));
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
-                                        }
+                                            on:keydown=on_keydown
+                                            placeholder=move || input_placeholder()
+                                            rows="1"
+                                            class=move || format!(
+                                                "flex-1 bg-transparent resize-none outline-none text-[#0d0d0d] dark:text-[#ececec] placeholder-gray-500 dark:placeholder-gray-400 text-base py-2 px-3 overflow-y-auto max-h-48 {}",
+                                                if active_parent_session_id().is_some() { "cursor-not-allowed" } else { "" }
+                                            )
+                                        ></textarea>
+                                        {move || if is_streaming.get() {
+                                            view! {
+                                                <button
+                                                    on:click=on_halt
+                                                    class="flex items-center justify-center w-8 h-8 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-md transition-all ml-2 mb-1"
+                                                    title="Stop stream"
+                                                >
+                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                    </svg>
+                                                </button>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <button
+                                                    on:click=on_send
+                                                    disabled=move || input_text.get().trim().is_empty() || active_parent_session_id().is_some()
+                                                    class="flex items-center justify-center w-8 h-8 rounded-full bg-black dark:bg-[#ececec] text-white dark:text-[#212121] disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-85 active:scale-95 transition-all ml-2 mb-1"
+                                                >
+                                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4">
+                                                        <line x1="12" y1="19" x2="12" y2="5"></line>
+                                                        <polyline points="5 12 12 5 19 12"></polyline>
+                                                    </svg>
+                                                </button>
+                                            }.into_any()
+                                        }}
+                                    </div>
+                                    <div class="text-[11px] text-center text-gray-500 dark:text-gray-400 mt-2 select-none">
+                                        "Antigravity Chat is powered by Gemini and Spin WASI. Messages are stored locally in KV."
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                >
+                    <div class="flex-1 flex flex-col h-full bg-[#1e1e1e] dark:bg-[#0c0c0c] text-gray-200 font-mono overflow-hidden">
+                        // macOS Window Title Bar
+                        <div class="h-10 bg-[#2d2d2d] dark:bg-[#1a1a1a] flex items-center px-4 justify-between border-b border-[#3d3d3d] dark:border-[#2a2a2a] select-none flex-shrink-0">
+                            <div class="flex items-center gap-1.5">
+                                <div class="w-3 h-3 rounded-full bg-[#ff5f56] border border-[#e0443e]"></div>
+                                <div class="w-3 h-3 rounded-full bg-[#ffbd2e] border border-[#dea123]"></div>
+                                <div class="w-3 h-3 rounded-full bg-[#27c93f] border border-[#1aab29]"></div>
+                            </div>
+                            <div class="text-xs text-gray-400 font-sans truncate px-2">
+                                {move || {
+                                    let (cmd, _, _, _, _) = terminal_info();
+                                    format!("bash — {}", cmd)
+                                }}
+                            </div>
+                            <div class="w-12"></div>
+                        </div>
+                        
+                        // Terminal Body
+                        <div class="flex-1 p-4 overflow-y-auto selection:bg-blue-500/30 selection:text-white" id="terminal-body">
+                            <div class="text-xs text-gray-500 dark:text-zinc-600 mb-2 select-none">
+                                "Last login: Fri May 22 13:00:38 on ttys001"
+                            </div>
+                            <div class="flex items-start gap-1 text-sm font-semibold text-emerald-400 dark:text-emerald-500 select-none">
+                                <span>"guest@antigravity"</span>
+                                <span class="text-gray-400">":"</span>
+                                <span class="text-blue-400">"~"</span>
+                                <span class="text-gray-400 font-normal">"$ "</span>
+                                <span class="text-gray-100 font-mono font-normal">
+                                    {move || {
+                                        let (cmd, _, _, _, _) = terminal_info();
+                                        cmd
+                                    }}
+                                </span>
+                            </div>
+                            
+                            <div class="mt-3 text-sm text-gray-100 whitespace-pre-wrap leading-relaxed select-text font-mono">
+                                {move || {
+                                    let (_, out, _, _, _) = terminal_info();
+                                    out
+                                }}
+                            </div>
+                            
+                            {move || {
+                                let (_, _, status, code, err) = terminal_info();
+                                match status.as_str() {
+                                    "running" => {
+                                        view! {
+                                            <div class="inline-block w-2 h-4 bg-gray-400 animate-pulse ml-0.5 align-middle"></div>
+                                        }.into_any()
                                     }
+                                    "completed" => {
+                                        view! {
+                                            <div class="mt-4 p-2 bg-emerald-950/20 border border-emerald-900/30 rounded-lg text-xs text-emerald-400 font-sans select-none">
+                                                {format!("✨ Process completed with exit code {}", code.unwrap_or(0))}
+                                            </div>
+                                        }.into_any()
+                                    }
+                                    "failed" => {
+                                        let err_msg = err.unwrap_or_else(|| "Unknown error".to_string());
+                                        let code_val = code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+                                        view! {
+                                            <div class="mt-4 p-2 bg-rose-950/20 border border-rose-900/30 rounded-lg text-xs text-rose-400 font-sans select-none">
+                                                {format!("🛑 Process failed (Exit Code: {}). Error: {}", code_val, err_msg)}
+                                            </div>
+                                        }.into_any()
+                                    }
+                                    _ => ().into_any(),
                                 }
-                                on:keydown=on_keydown
-                                placeholder="Message Antigravity..."
-                                rows="1"
-                                class="flex-1 bg-transparent resize-none outline-none text-[#0d0d0d] dark:text-[#ececec] placeholder-gray-500 dark:placeholder-gray-400 text-base py-2 px-3 overflow-y-auto max-h-48"
-                            ></textarea>
-                            {move || if is_streaming.get() {
-                                view! {
-                                    <button
-                                        on:click=on_halt
-                                        class="flex items-center justify-center w-8 h-8 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-md transition-all ml-2 mb-1"
-                                        title="Stop stream"
-                                    >
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                        </svg>
-                                    </button>
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <button
-                                        on:click=on_send
-                                        disabled=move || input_text.get().trim().is_empty()
-                                        class="flex items-center justify-center w-8 h-8 rounded-full bg-black dark:bg-[#ececec] text-white dark:text-[#212121] disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-85 active:scale-95 transition-all ml-2 mb-1"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4">
-                                            <line x1="12" y1="19" x2="12" y2="5"></line>
-                                            <polyline points="5 12 12 5 19 12"></polyline>
-                                        </svg>
-                                    </button>
-                                }.into_any()
                             }}
                         </div>
-                        <div class="text-[11px] text-center text-gray-500 dark:text-gray-400 mt-2 select-none">
-                            "Antigravity Chat is powered by Gemini and Spin WASI. Messages are stored locally in KV."
-                        </div>
                     </div>
-                </div>
+                </Show>
             </div>
 
             // Open Folder Modal — shown when multiple matches found, or as manual entry fallback
@@ -3675,7 +4267,7 @@ fn ChatPage() -> impl IntoView {
                 };
                 format!("h-full flex flex-col transition-all duration-300 ease-in-out bg-white/60 dark:bg-[#151515]/60 backdrop-blur-xl overflow-hidden shrink-0 {}", width)
             }>
-                <div class="p-4 border-b border-gray-200/10 dark:border-white/5 flex items-center justify-between">
+                <div class="p-4 border-b border-gray-200/10 dark:border-white/5 flex items-center justify-between flex-shrink-0">
                     <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200">
                         "Agent Status Hub"
                     </h3>
@@ -3689,24 +4281,67 @@ fn ChatPage() -> impl IntoView {
                     </button>
                 </div>
 
+                <div class="px-4 py-2 border-b border-gray-200/10 dark:border-white/5 flex gap-1 flex-shrink-0 select-none">
+                    <button
+                        on:click=move |_| set_hub_filter.set(HubFilter::Running)
+                        class=move || format!(
+                            "flex-1 text-center py-1 text-[10px] font-bold rounded transition-colors {}",
+                            if hub_filter.get() == HubFilter::Running {
+                                "bg-blue-600/20 text-blue-500 dark:text-blue-400 border border-blue-500/30"
+                            } else {
+                                "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 border border-transparent"
+                            }
+                        )
+                    >
+                        "Running"
+                    </button>
+                    <button
+                        on:click=move |_| set_hub_filter.set(HubFilter::Completed)
+                        class=move || format!(
+                            "flex-1 text-center py-1 text-[10px] font-bold rounded transition-colors {}",
+                            if hub_filter.get() == HubFilter::Completed {
+                                "bg-blue-600/20 text-blue-500 dark:text-blue-400 border border-blue-500/30"
+                            } else {
+                                "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 border border-transparent"
+                            }
+                        )
+                    >
+                        "Completed"
+                    </button>
+                    <button
+                        on:click=move |_| set_hub_filter.set(HubFilter::All)
+                        class=move || format!(
+                            "flex-1 text-center py-1 text-[10px] font-bold rounded transition-colors {}",
+                            if hub_filter.get() == HubFilter::All {
+                                "bg-blue-600/20 text-blue-500 dark:text-blue-400 border border-blue-500/30"
+                            } else {
+                                "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 border border-transparent"
+                            }
+                        )
+                    >
+                        "All"
+                    </button>
+                </div>
+
                 <div class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
                     {move || {
-                        let subagents = collect_subagents_recursive(&blocks.get());
-                        if subagents.is_empty() {
+                        let all_items = collect_hub_items_recursive(&blocks.get(), &blocks.get());
+                        let filtered_items = filter_hub_items(all_items, hub_filter.get());
+                        if filtered_items.is_empty() {
                             view! {
                                 <div class="flex flex-col items-center justify-center h-48 text-center text-gray-400 dark:text-zinc-500">
                                     <svg class="w-8 h-8 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
                                     </svg>
-                                    <span class="text-xs">"No active subagents"</span>
+                                    <span class="text-xs">"No active items matching filter"</span>
                                 </div>
                             }.into_any()
                         } else {
                             view! {
                                 <div class="flex flex-col space-y-4">
-                                    {subagents.into_iter().map(|item| {
+                                    {filtered_items.into_iter().map(|item| {
                                         view! {
-                                            <SubagentStatusItem item=item depth=0 />
+                                            <HubStatusItem item=item depth=0 />
                                         }
                                     }).collect::<Vec<_>>()}
                                 </div>
@@ -4133,6 +4768,8 @@ fn migrate_legacy_messages(
         title: session.title.clone(),
         created_at: session.created_at,
         updated_at: session.updated_at,
+        parent_session_id: None,
+        is_process: None,
     };
 
     store
@@ -4174,6 +4811,8 @@ pub async fn create_session(title: Option<String>) -> Result<String, ServerFnErr
         title: title.unwrap_or_else(|| "New Chat".to_string()),
         created_at: now,
         updated_at: now,
+        parent_session_id: None,
+        is_process: None,
     };
 
     idx.sessions.insert(0, meta);
@@ -4245,16 +4884,36 @@ pub async fn rename_session(session_id: String, new_title: String) -> Result<(),
 /// Get all message blocks for a session.
 #[server(prefix = "/api")]
 pub async fn get_session_blocks(session_id: String) -> Result<Vec<MessageBlock>, ServerFnError<String>> {
+    match get_session(session_id, true).await {
+        Ok(sess) => Ok(sess.blocks),
+        Err(e) => Err(e),
+    }
+}
+
+/// Get a complete ChatSession struct.
+#[server(prefix = "/api")]
+pub async fn get_session(session_id: String, reconcile_stale: bool) -> Result<ChatSession, ServerFnError<String>> {
     let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
     match store.get_json::<ChatSession>(&format!("session_{}", session_id)) {
-        Ok(Some(sess)) => Ok(sess.blocks),
-        _ => Ok(Vec::new()),
+        Ok(Some(mut sess)) => {
+            if reconcile_stale {
+                if reconcile_stale_blocks(&mut sess.blocks) {
+                    let _ = save_session_internal(&store, &session_id, sess.clone(), None);
+                }
+            }
+            Ok(sess)
+        }
+        _ => Err(ServerFnError::ServerError(format!("Session {} not found", session_id))),
     }
 }
 
 /// Save/update all blocks for a session, and auto-update title.
 #[server(prefix = "/api", input = leptos::server_fn::codec::Json)]
-pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> Result<(), ServerFnError<String>> {
+pub async fn save_turn_blocks(
+    session_id: String,
+    blocks: Vec<MessageBlock>,
+    pending_confirm: Option<PendingConfirm>,
+) -> Result<(), ServerFnError<String>> {
     let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
     let mut sess = match store.get_json::<ChatSession>(&format!("session_{}", session_id)) {
         Ok(Some(s)) => s,
@@ -4262,11 +4921,7 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
     };
 
     sess.blocks = blocks;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    sess.updated_at = now;
+    sess.pending_confirm = pending_confirm.clone();
 
     // Auto-update title if it's "New Chat" and we have a user message.
     // Use the first non-empty line of the first UserMessage, truncated to 50
@@ -4296,7 +4951,28 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
         }
     }
 
+    save_session_internal(&store, &session_id, sess, new_title)
+}
+
+#[cfg(feature = "ssr")]
+fn save_session_internal(
+    store: &spin_sdk::key_value::Store,
+    session_id: &str,
+    mut sess: ChatSession,
+    new_title: Option<String>,
+) -> Result<(), ServerFnError<String>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    sess.updated_at = now;
+
+    // Save parent session to KV
     store.set_json(format!("session_{}", session_id), &sess).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+
+    // Extract and save derived sessions (subagents and command processes)
+    let mut derived_sessions = Vec::new();
+    collect_derived_sessions_recursive(session_id, &sess.blocks, &mut derived_sessions, sess.pending_confirm.as_ref());
 
     // Also update session_index
     let mut idx = match store.get_json::<SessionIndex>("session_index") {
@@ -4304,27 +4980,248 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
         _ => SessionIndex { sessions: Vec::new() },
     };
 
+    // Save all derived sessions and register them in SessionIndex
+    for mut sub_s in derived_sessions {
+        sub_s.updated_at = now;
+        let sub_id = sub_s.id.clone();
+        
+        // Merge or set session in KV
+        store.set_json(format!("session_{}", sub_id), &sub_s)
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+            
+        if let Some(pos) = idx.sessions.iter().position(|s| s.id == sub_id) {
+            idx.sessions[pos].updated_at = now;
+            idx.sessions[pos].title = sub_s.title.clone();
+            idx.sessions[pos].parent_session_id = sub_s.parent_session_id.clone();
+            idx.sessions[pos].is_process = sub_s.is_process;
+        } else {
+            idx.sessions.insert(0, SessionMeta {
+                id: sub_id,
+                title: sub_s.title.clone(),
+                created_at: sub_s.created_at,
+                updated_at: now,
+                parent_session_id: sub_s.parent_session_id.clone(),
+                is_process: sub_s.is_process,
+            });
+        }
+    }
+
     if let Some(pos) = idx.sessions.iter().position(|s| s.id == session_id) {
         if let Some(t) = new_title {
             idx.sessions[pos].title = t;
         }
         idx.sessions[pos].updated_at = now;
+        idx.sessions[pos].parent_session_id = sess.parent_session_id.clone();
+        idx.sessions[pos].is_process = sess.is_process;
         // Move to the top (most recently updated)
         let meta = idx.sessions.remove(pos);
         idx.sessions.insert(0, meta);
     } else {
         // Fallback: create index entry if missing
         idx.sessions.insert(0, SessionMeta {
-            id: session_id,
+            id: session_id.to_string(),
             title: sess.title.clone(),
             created_at: sess.created_at,
             updated_at: now,
+            parent_session_id: sess.parent_session_id.clone(),
+            is_process: sess.is_process,
         });
     }
 
     store.set_json("session_index", &idx).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn reconcile_stale_blocks(blocks: &mut [MessageBlock]) -> bool {
+    let mut modified = false;
+    for block in blocks {
+        match block {
+            MessageBlock::ToolCall { status, subagent_blocks, .. } => {
+                if *status == ToolCallStatus::Running {
+                    *status = ToolCallStatus::Error;
+                    modified = true;
+                }
+                if reconcile_stale_blocks(subagent_blocks) {
+                    modified = true;
+                }
+            }
+            MessageBlock::Thinking { is_streaming, .. } => {
+                if *is_streaming {
+                    *is_streaming = false;
+                    modified = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    modified
+}
+
+/// Resolve/sync confirmation in KV database for both parent and child sessions.
+#[server(prefix = "/api", input = leptos::server_fn::codec::Json)]
+pub async fn resolve_session_confirm_kv(
+    session_id: String,
+    parent_session_id: Option<String>,
+    accepted: bool,
+    pending: PendingConfirm,
+) -> Result<(), ServerFnError<String>> {
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut resolved_ids = vec![session_id.clone()];
+    if let Some(ref p_id) = parent_session_id {
+        resolved_ids.push(p_id.clone());
+    } else {
+        // Find child sessions for this parent
+        if let Ok(Some(idx)) = store.get_json::<SessionIndex>("session_index") {
+            for s_meta in idx.sessions {
+                if s_meta.parent_session_id.as_deref() == Some(&session_id) {
+                    resolved_ids.push(s_meta.id.clone());
+                }
+            }
+        }
+    }
+
+    for id in resolved_ids {
+        if let Ok(Some(mut sess)) = store.get_json::<ChatSession>(&format!("session_{}", id)) {
+            sess.pending_confirm = None;
+            sess.updated_at = now;
+            
+            let chip_id = sess.next_id();
+            let has_confirm = sess.blocks.iter().any(|b| {
+                if let MessageBlock::Confirmation { trajectory_id, step_index, .. } = b {
+                    *trajectory_id == pending.trajectory_id && *step_index == pending.step_index
+                } else {
+                    false
+                }
+            });
+            
+            if !has_confirm {
+                sess.blocks.push(MessageBlock::Confirmation {
+                    id: chip_id,
+                    trajectory_id: pending.trajectory_id.clone(),
+                    step_index: pending.step_index,
+                    tool_call: pending.tool_call.clone(),
+                    decision: Some(accepted),
+                });
+            }
+            
+            let _ = store.set_json(format!("session_{}", id), &sess);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn collect_derived_sessions_recursive(
+    parent_session_id: &str,
+    blocks: &[MessageBlock],
+    derived_sessions: &mut Vec<ChatSession>,
+    parent_pending_confirm: Option<&PendingConfirm>,
+) {
+    for block in blocks {
+        if let MessageBlock::ToolCall {
+            call_id,
+            name,
+            args,
+            label,
+            subagent_trajectory_id,
+            subagent_blocks,
+            ..
+        } = block {
+            if name == "START_SUBAGENT" {
+                if let Some(traj_id) = subagent_trajectory_id {
+                    let title = label.clone().unwrap_or_else(|| "Subagent Session".to_string());
+                    let mut sub_sess = ChatSession::new(traj_id.clone());
+                    sub_sess.title = format!("Subagent: {}", title);
+                    sub_sess.blocks = subagent_blocks.clone();
+                    sub_sess.parent_session_id = Some(parent_session_id.to_string());
+                    sub_sess.is_process = Some(false);
+                    
+                    // Attach pending confirmation if this subagent triggered it
+                    if let Some(pc) = parent_pending_confirm {
+                        if pc.trajectory_id == *traj_id {
+                            sub_sess.pending_confirm = Some(pc.clone());
+                        }
+                    }
+                    
+                    if sub_sess.pending_confirm.is_none() {
+                        sub_sess.pending_confirm = find_pending_confirm_recursive(subagent_blocks);
+                    }
+                    
+                    derived_sessions.push(sub_sess);
+                    collect_derived_sessions_recursive(parent_session_id, subagent_blocks, derived_sessions, parent_pending_confirm);
+                }
+            } else if name == "RUN_COMMAND" {
+                let cmd_line = args.get("command_line")
+                    .or_else(|| args.get("CommandLine"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("run_command")
+                    .to_string();
+                
+                let mut proc_sess = ChatSession::new(call_id.clone());
+                proc_sess.title = format!("Process: {}", cmd_line);
+                proc_sess.parent_session_id = Some(parent_session_id.to_string());
+                proc_sess.is_process = Some(true);
+                
+                let mut proc_blocks = vec![block.clone()];
+                if let Some(result_block) = find_tool_result_recursive(blocks, call_id) {
+                    proc_blocks.push(result_block);
+                }
+                proc_sess.blocks = proc_blocks;
+                
+                derived_sessions.push(proc_sess);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn find_pending_confirm_recursive(blocks: &[MessageBlock]) -> Option<PendingConfirm> {
+    for b in blocks {
+        if let MessageBlock::Confirmation {
+            trajectory_id,
+            step_index,
+            tool_call,
+            decision: None,
+            ..
+        } = b {
+            return Some(PendingConfirm {
+                trajectory_id: trajectory_id.clone(),
+                step_index: *step_index,
+                tool_name: tool_call.name.clone(),
+                tool_call: tool_call.clone(),
+            });
+        }
+        if let MessageBlock::ToolCall { subagent_blocks, .. } = b {
+            if let Some(pc) = find_pending_confirm_recursive(subagent_blocks) {
+                return Some(pc);
+            }
+        }
+    }
+    None
+}
+
+fn find_tool_result_recursive(blocks: &[MessageBlock], target_call_id: &str) -> Option<MessageBlock> {
+    for b in blocks {
+        if let MessageBlock::ToolResult { call_id, .. } = b {
+            if call_id == target_call_id {
+                return Some(b.clone());
+            }
+        }
+        if let MessageBlock::ToolCall { subagent_blocks, .. } = b {
+            if let Some(res) = find_tool_result_recursive(subagent_blocks, target_call_id) {
+                return Some(res);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(feature = "hydrate")]
@@ -4458,5 +5355,94 @@ mod tests {
     fn test_extract_image_paths_none() {
         let paths = extract_image_paths_from_result(None);
         assert!(paths.is_empty());
+    }
+
+    #[cfg(feature = "hydrate")]
+    #[test]
+    fn test_duplicate_and_associate_subagent() {
+        let mut blocks = vec![MessageBlock::ToolCall {
+            id: 1,
+            call_id: "call_1".to_string(),
+            name: "START_SUBAGENT".to_string(),
+            args: serde_json::json!({}),
+            canonical_path: None,
+            label: Some("Launch Subagent".to_string()),
+            status: ToolCallStatus::Running,
+            subagent_trajectory_id: Some("traj_first".to_string()),
+            subagent_blocks: vec![],
+        }];
+
+        let counter = std::cell::Cell::new(10u64);
+        let next_id = || {
+            let val = counter.get();
+            counter.set(val + 1);
+            val
+        };
+
+        let result = duplicate_and_associate_subagent(&mut blocks, "traj_second", &next_id);
+        assert!(result);
+        assert_eq!(blocks.len(), 2);
+
+        if let MessageBlock::ToolCall { subagent_trajectory_id, .. } = &blocks[0] {
+            assert_eq!(subagent_trajectory_id.as_deref(), Some("traj_first"));
+        } else {
+            panic!("Expected ToolCall");
+        }
+
+        if let MessageBlock::ToolCall { id, subagent_trajectory_id, status, subagent_blocks, .. } = &blocks[1] {
+            assert_eq!(*id, 10);
+            assert_eq!(subagent_trajectory_id.as_deref(), Some("traj_second"));
+            assert_eq!(*status, ToolCallStatus::Running);
+            assert!(subagent_blocks.is_empty());
+        } else {
+            panic!("Expected ToolCall");
+        }
+    }
+
+    #[cfg(feature = "hydrate")]
+    #[test]
+    fn test_ensure_and_update_subagent_blocks_duplication() {
+        let mut blocks = vec![MessageBlock::ToolCall {
+            id: 1,
+            call_id: "call_1".to_string(),
+            name: "START_SUBAGENT".to_string(),
+            args: serde_json::json!({}),
+            canonical_path: None,
+            label: Some("Launch Subagent".to_string()),
+            status: ToolCallStatus::Running,
+            subagent_trajectory_id: Some("traj_first".to_string()),
+            subagent_blocks: vec![],
+        }];
+
+        let counter = std::cell::Cell::new(100u64);
+        let next_id = || {
+            let val = counter.get();
+            counter.set(val + 1);
+            val
+        };
+
+        ensure_and_update_subagent_blocks(&mut blocks, "traj_second", |sub_blocks| {
+            sub_blocks.push(MessageBlock::Thinking {
+                id: 999,
+                content: "thinking...".to_string(),
+                is_streaming: false,
+            });
+        }, &next_id);
+
+        assert_eq!(blocks.len(), 2);
+
+        if let MessageBlock::ToolCall { id, subagent_trajectory_id, subagent_blocks, .. } = &blocks[1] {
+            assert_eq!(*id, 100);
+            assert_eq!(subagent_trajectory_id.as_deref(), Some("traj_second"));
+            assert_eq!(subagent_blocks.len(), 1);
+            if let MessageBlock::Thinking { id: think_id, content, .. } = &subagent_blocks[0] {
+                assert_eq!(*think_id, 999);
+                assert_eq!(content, "thinking...");
+            } else {
+                panic!("Expected Thinking block");
+            }
+        } else {
+            panic!("Expected ToolCall block");
+        }
     }
 }

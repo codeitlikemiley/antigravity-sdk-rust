@@ -153,6 +153,15 @@ pub struct ChatSession {
     pub blocks: Vec<MessageBlock>,
     /// Monotonically increasing counter for assigning unique block IDs
     pub block_id_counter: u64,
+    /// If this is a derived subagent/process session, the ID of the parent session
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    /// If this session is a command execution process session
+    #[serde(default)]
+    pub is_process: Option<bool>,
+    /// Any pending confirmation required by this session
+    #[serde(default)]
+    pub pending_confirm: Option<PendingConfirm>,
 }
 
 #[allow(dead_code)]
@@ -175,6 +184,9 @@ impl ChatSession {
             updated_at: now,
             blocks: Vec::new(),
             block_id_counter: 0,
+            parent_session_id: None,
+            is_process: None,
+            pending_confirm: None,
         }
     }
 
@@ -200,6 +212,10 @@ pub struct SessionMeta {
     pub title: String,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub is_process: Option<bool>,
 }
 
 /// Legacy flat chat message (retained for backward compatibility).
@@ -231,6 +247,7 @@ pub struct QuestionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnswerPayload {
     pub session_id: String,
+    pub parent_session_id: Option<String>,
     pub trajectory_id: String,
     pub step_index: u32,
     pub responses: Vec<QuestionResponse>,
@@ -242,6 +259,7 @@ pub struct AnswerPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfirmPayload {
     pub session_id: String,
+    pub parent_session_id: Option<String>,
     pub trajectory_id: String,
     pub step_index: u32,
     pub accepted: bool,
@@ -249,5 +267,14 @@ pub struct ConfirmPayload {
     pub allow_for_session: bool,
     /// Name of the tool being confirmed (needed for auto-allow tracking).
     pub tool_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PendingConfirm {
+    pub trajectory_id: String,
+    pub step_index: u32,
+    pub tool_name: String,
+    // Full tool call so the floating panel can show args without a separate block.
+    pub tool_call: ClientToolCall,
 }
 

@@ -186,12 +186,15 @@ struct AppState {
 struct ChatStreamParams {
     message: String,
     session_id: String,
+    parent_session_id: Option<String>,
 }
 
 /// Request body for `POST /answer`.
 #[derive(Debug, Deserialize)]
 struct AnswerRequest {
     session_id: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
     trajectory_id: String,
     step_index: u32,
     responses: Vec<QuestionResponse>,
@@ -203,6 +206,8 @@ struct AnswerRequest {
 #[derive(Debug, Deserialize)]
 struct ConfirmRequest {
     session_id: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
     trajectory_id: String,
     step_index: u32,
     accepted: bool,
@@ -217,6 +222,8 @@ struct ConfirmRequest {
 #[derive(Debug, Deserialize)]
 struct HaltRequest {
     session_id: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
 }
 
 /// Request body for `POST /workspace` — set or change a session's workspace.
@@ -255,6 +262,7 @@ async fn build_session(
     config: &ServerConfig,
     session_id: &str,
     workspace_override: Option<String>,
+    parent_auto_allowed: Option<Arc<RwLock<HashSet<String>>>>,
 ) -> Result<SessionEntry, anyhow::Error> {
     // 1. Resolve workspace path
     let workspace = workspace_override
@@ -312,7 +320,7 @@ async fn build_session(
     // Build the shared auto-allowed set and confirm channel.
     // ConfirmHook holds the Sender and auto_allowed Arc.
     // SessionEntry holds the Receiver (moved into stream handler on first chat).
-    let auto_allowed: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+    let auto_allowed = parent_auto_allowed.unwrap_or_else(|| Arc::new(RwLock::new(HashSet::new())));
     let (confirm_tx, confirm_rx) = tokio::sync::mpsc::channel::<ConfirmHookRequest>(4);
     let hook = Arc::new(ConfirmHook {
         confirm_tx,
@@ -380,6 +388,7 @@ async fn build_session(
 async fn get_or_create_session(
     state: &AppState,
     session_id: &str,
+    parent_session_id: Option<String>,
 ) -> Result<Arc<Mutex<SessionEntry>>, anyhow::Error> {
     let sessions = state.sessions.lock().await;
     if let Some(entry) = sessions.get(session_id) {
@@ -387,7 +396,20 @@ async fn get_or_create_session(
     }
     // Not found — create fresh
     drop(sessions); // release lock while we do the async build
-    let entry = build_session(&state.config, session_id, None).await?;
+
+    let parent_auto_allowed = if let Some(ref p_id) = parent_session_id {
+        let parent_sessions = state.sessions.lock().await;
+        if let Some(parent_entry) = parent_sessions.get(p_id) {
+            let parent_lock = parent_entry.lock().await;
+            Some(parent_lock.auto_allowed.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let entry = build_session(&state.config, session_id, None, parent_auto_allowed).await?;
     let entry_arc = Arc::new(Mutex::new(entry));
     let mut sessions = state.sessions.lock().await;
     // Double-check after re-acquiring (another request may have beaten us)
@@ -410,7 +432,7 @@ async fn chat_stream_handler(
     let session_id = params.session_id.clone();
 
     // Get (or lazily create) the session — on failure emit error events via the same channel
-    match get_or_create_session(&state, &session_id).await {
+    match get_or_create_session(&state, &session_id, params.parent_session_id.clone()).await {
         Err(e) => {
             tracing::error!("Failed to create session {session_id}: {e:?}");
             let tx2 = tx.clone();
@@ -870,7 +892,8 @@ async fn halt_handler(
     Json(req): Json<HaltRequest>,
 ) -> impl IntoResponse {
     let sessions = state.sessions.lock().await;
-    let Some(entry_arc) = sessions.get(&req.session_id).cloned() else {
+    let lookup_id = req.parent_session_id.as_ref().unwrap_or(&req.session_id);
+    let Some(entry_arc) = sessions.get(lookup_id).cloned() else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "error": "Session not found" })));
     };
     drop(sessions);
@@ -893,7 +916,8 @@ async fn answer_handler(
     Json(req): Json<AnswerRequest>,
 ) -> impl IntoResponse {
     let sessions = state.sessions.lock().await;
-    let Some(entry_arc) = sessions.get(&req.session_id).cloned() else {
+    let lookup_id = req.parent_session_id.as_ref().unwrap_or(&req.session_id);
+    let Some(entry_arc) = sessions.get(lookup_id).cloned() else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "error": "Session not found" })));
     };
     drop(sessions);
@@ -940,7 +964,8 @@ async fn confirm_handler(
     Json(req): Json<ConfirmRequest>,
 ) -> impl IntoResponse {
     let sessions = state.sessions.lock().await;
-    let Some(entry_arc) = sessions.get(&req.session_id).cloned() else {
+    let lookup_id = req.parent_session_id.as_ref().unwrap_or(&req.session_id);
+    let Some(entry_arc) = sessions.get(lookup_id).cloned() else {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "error": "Session not found" })));
     };
     drop(sessions);
@@ -950,7 +975,7 @@ async fn confirm_handler(
         if let Some(ref name) = req.tool_name {
             let session = entry_arc.lock().await;
             session.auto_allowed.write().await.insert(name.clone());
-            tracing::info!("Session {}: auto-allowing tool '{name}' for session", req.session_id);
+            tracing::info!("Session {}: auto-allowing tool '{name}' for session", lookup_id);
         }
     }
 
@@ -966,7 +991,7 @@ async fn confirm_handler(
         let _ = tx.send(req.accepted);
         tracing::info!(
             "Session {}: user {} tool '{}'",
-            req.session_id,
+            lookup_id,
             if req.accepted { "approved" } else { "denied" },
             req.tool_name.as_deref().unwrap_or("?"),
         );
@@ -1037,7 +1062,7 @@ async fn set_workspace_handler(
     }
 
     // Build new agent with the chosen workspace
-    match build_session(&state.config, &req.session_id, Some(canonical.clone())).await {
+    match build_session(&state.config, &req.session_id, Some(canonical.clone()), None).await {
         Ok(entry) => {
             let entry_arc = Arc::new(Mutex::new(entry));
             let mut sessions = state.sessions.lock().await;
