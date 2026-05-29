@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 PLATFORM=""
 case "$(uname -s)" in
     Darwin)
