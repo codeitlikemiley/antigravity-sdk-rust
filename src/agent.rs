@@ -6,7 +6,8 @@ use crate::policy::{self, Policy, PolicyEnforcer};
 use crate::tools::{DynTool, ToolRunner};
 use crate::triggers::{DynTrigger, TriggerRunner};
 use crate::types::{
-    BuiltinTools, CapabilitiesConfig, ChatResponse, GeminiConfig, SystemInstructions,
+    BuiltinTools, CapabilitiesConfig, ChatResponse, GeminiConfig, McpServerConfig,
+    SystemInstructions,
 };
 use anyhow::anyhow;
 use futures_util::future::BoxFuture;
@@ -44,6 +45,8 @@ pub struct AgentConfig {
     pub app_data_dir: Option<String>,
     /// Optional JSON schema constraining the final structured tool output.
     pub response_schema: Option<String>,
+    /// MCP server configurations to connect to external tool servers.
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -63,6 +66,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("conversation_id", &self.conversation_id)
             .field("app_data_dir", &self.app_data_dir)
             .field("response_schema", &self.response_schema)
+            .field("mcp_servers", &self.mcp_servers)
             .finish()
     }
 }
@@ -358,6 +362,7 @@ impl Agent<Unstarted> {
                     Some(self.tool_runner.clone()),
                     Some(self.hook_runner.clone()),
                     self.config.conversation_id.clone().unwrap_or_default(),
+                    self.config.mcp_servers.clone(),
                 );
 
                 let conn = strategy.connect().await?;
@@ -551,6 +556,18 @@ impl<P> AgentBuilder<P> {
 
     pub fn response_schema(mut self, response_schema: impl Into<String>) -> Self {
         self.config.response_schema = Some(response_schema.into());
+        self
+    }
+
+    /// Adds a single MCP server configuration.
+    pub fn mcp_server(mut self, server: McpServerConfig) -> Self {
+        self.config.mcp_servers.push(server);
+        self
+    }
+
+    /// Sets the full list of MCP server configurations.
+    pub fn mcp_servers(mut self, servers: Vec<McpServerConfig>) -> Self {
+        self.config.mcp_servers = servers;
         self
     }
 

@@ -20,8 +20,8 @@ use crate::proto::localharness::{
 use crate::tools::ToolRunner;
 use crate::types::{
     AntigravityExecutionError, AskQuestionEntry, AskQuestionOption, BuiltinTools,
-    CapabilitiesConfig, GeminiConfig, QuestionHookResult, Step, StepSource, StepStatus, StepTarget,
-    StepType, SystemInstructions, ToolCall, ToolResult, UsageMetadata,
+    CapabilitiesConfig, GeminiConfig, McpServerConfig, QuestionHookResult, Step, StepSource,
+    StepStatus, StepTarget, StepType, SystemInstructions, ToolCall, ToolResult, UsageMetadata,
 };
 
 use anyhow::anyhow;
@@ -341,6 +341,8 @@ pub struct LocalConnectionStrategy {
     pub hook_runner: Option<HookRunner>,
     /// Conversation ID for standard session resuming or tracking.
     pub conversation_id: String,
+    /// MCP server configurations.
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl LocalConnectionStrategy {
@@ -357,6 +359,7 @@ impl LocalConnectionStrategy {
         tool_runner: Option<ToolRunner>,
         hook_runner: Option<HookRunner>,
         conversation_id: String,
+        mcp_servers: Vec<McpServerConfig>,
     ) -> Self {
         Self {
             binary_path,
@@ -369,6 +372,7 @@ impl LocalConnectionStrategy {
             tool_runner,
             hook_runner,
             conversation_id,
+            mcp_servers,
         }
     }
 

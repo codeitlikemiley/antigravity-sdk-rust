@@ -41,6 +41,7 @@ async fn test_advanced_conversation_example() -> Result<(), anyhow::Error> {
         Some(tool_runner),
         None,
         "my_conversation_id".to_string(),
+        vec![],
     );
 
     if false {
