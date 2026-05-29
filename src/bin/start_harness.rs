@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_directory: Some("target/harness_store".to_string()),
         port: Some(8000),
         bind_address: Some("127.0.0.1".to_string()),
+        client_info: None,
     };
 
     // Serialize InputConfig

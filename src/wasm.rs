@@ -35,9 +35,9 @@ use crate::proto::localharness::{
 };
 use crate::tools::ToolRunner;
 use crate::types::{
-    AskQuestionEntry, AskQuestionOption, BuiltinTools, CapabilitiesConfig, GeminiConfig,
-    QuestionHookResult, Step, StepSource, StepStatus, StepTarget, StepType, SystemInstructions,
-    ToolCall, ToolResult, UsageMetadata,
+    AntigravityExecutionError, AskQuestionEntry, AskQuestionOption, BuiltinTools,
+    CapabilitiesConfig, GeminiConfig, QuestionHookResult, Step, StepSource, StepStatus, StepTarget,
+    StepType, SystemInstructions, ToolCall, ToolResult, UsageMetadata,
 };
 
 /// Internal state tracker for matching `StepUpdate` payloads with active handshakes.
@@ -216,6 +216,9 @@ impl WasmConnectionStrategy {
                 }),
             enable_url_context: self.gemini_config.enable_url_context,
             enable_google_search: self.gemini_config.enable_google_search,
+            use_vertex: Some(self.gemini_config.vertex),
+            project: self.gemini_config.project.clone(),
+            location: self.gemini_config.location.clone(),
         };
 
         let mut proto_workspaces = Vec::new();
@@ -457,6 +460,7 @@ impl WasmConnectionStrategy {
                                                 Some(2) => StepStatus::Done,
                                                 Some(3) => StepStatus::WaitingForUser,
                                                 Some(4) => StepStatus::Error,
+                                                Some(5) => StepStatus::TerminalError,
                                                 _ => StepStatus::Unknown,
                                             };
 
@@ -518,6 +522,16 @@ impl WasmConnectionStrategy {
                                             {
                                                 let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
                                                 let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
+                                                break;
+                                            }
+
+                                            // Handle terminal errors — non-recoverable agent execution failure.
+                                            if status == StepStatus::TerminalError {
+                                                let err_msg = step_update.error_message.clone()
+                                                    .unwrap_or_else(|| "Terminal error occurred during execution".to_string());
+                                                let _ = step_tx.send(Err(
+                                                    AntigravityExecutionError { message: err_msg }.into()
+                                                ));
                                                 break;
                                             }
 

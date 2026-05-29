@@ -7,21 +7,21 @@
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
-    FileEditToolConfig, FilesystemWorkspace, FindToolConfig, GeminiConfig as ProtoGeminiConfig,
-    GenerateImageToolConfig, GrepSearchToolConfig, HarnessConfig, HarnessSideTools,
-    InitializeConversationEvent, InputConfig, InputEvent, ListDirToolConfig, MultipleChoiceAnswer,
-    OutputConfig, OutputEvent, RunCommandToolConfig, SubagentsConfig,
-    SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
-    ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
+    ClientInfo as ProtoClientInfo, FileEditToolConfig, FilesystemWorkspace, FindToolConfig,
+    GeminiConfig as ProtoGeminiConfig, GenerateImageToolConfig, GrepSearchToolConfig,
+    HarnessConfig, HarnessSideTools, InitializeConversationEvent, InputConfig, InputEvent,
+    ListDirToolConfig, MultipleChoiceAnswer, OutputConfig, OutputEvent, RunCommandToolConfig,
+    SubagentsConfig, SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool,
+    ToolConfirmation, ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
     ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
     appended_system_instructions::Section, custom_system_instructions::Part,
     user_questions_response::QuestionsResponse, workspace::WorkspaceType,
 };
 use crate::tools::ToolRunner;
 use crate::types::{
-    AskQuestionEntry, AskQuestionOption, BuiltinTools, CapabilitiesConfig, GeminiConfig,
-    QuestionHookResult, Step, StepSource, StepStatus, StepTarget, StepType, SystemInstructions,
-    ToolCall, ToolResult, UsageMetadata,
+    AntigravityExecutionError, AskQuestionEntry, AskQuestionOption, BuiltinTools,
+    CapabilitiesConfig, GeminiConfig, QuestionHookResult, Step, StepSource, StepStatus, StepTarget,
+    StepType, SystemInstructions, ToolCall, ToolResult, UsageMetadata,
 };
 
 use anyhow::anyhow;
@@ -381,6 +381,7 @@ impl LocalConnectionStrategy {
     /// or the WebSocket upgrade fails.
     #[allow(clippy::too_many_lines)]
     pub async fn connect(&self) -> Result<LocalConnection, anyhow::Error> {
+        let use_vertex = self.gemini_config.vertex;
         let api_key = self
             .gemini_config
             .models
@@ -390,11 +391,24 @@ impl LocalConnectionStrategy {
             .or_else(|| self.gemini_config.api_key.clone())
             .or_else(|| std::env::var("GEMINI_API_KEY").ok());
 
-        let api_key = api_key.ok_or_else(|| {
-            anyhow!(
+        if !use_vertex && api_key.is_none() {
+            return Err(anyhow!(
                 "A Gemini API key is required. Set it via GeminiConfig or GEMINI_API_KEY env var."
-            )
-        })?;
+            ));
+        }
+
+        if use_vertex {
+            let has_project = self.gemini_config.project.is_some();
+            let has_location = self.gemini_config.location.is_some();
+            if api_key.is_none() && !(has_project && has_location) {
+                return Err(anyhow!(
+                    "For Vertex AI, either a GCP project and location, or an API key \
+                     (Express Mode) must be set."
+                ));
+            }
+        }
+
+        let api_key = api_key.unwrap_or_default();
 
         // 1. Spawning localharness subprocess
         // Explicitly forward SHELL and PATH so the harness can fork /bin/sh for
@@ -426,10 +440,17 @@ impl LocalConnectionStrategy {
             .ok_or_else(|| anyhow!("Failed to open child stderr"))?;
 
         // 2. Perform Handshake via length-prefixed protocol buffer over stdin/stdout
+        let client_info = ProtoClientInfo {
+            language: Some("rust".to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            language_version: Some(rustc_version()),
+        };
+
         let input_config = InputConfig {
             storage_directory: self.save_dir.clone(),
             port: None,
             bind_address: None,
+            client_info: Some(client_info),
         };
 
         let mut input_buf = Vec::new();
@@ -555,6 +576,9 @@ impl LocalConnectionStrategy {
                 }),
             enable_url_context: self.gemini_config.enable_url_context,
             enable_google_search: self.gemini_config.enable_google_search,
+            use_vertex: Some(self.gemini_config.vertex),
+            project: self.gemini_config.project.clone(),
+            location: self.gemini_config.location.clone(),
         };
 
         let mut proto_workspaces = Vec::new();
@@ -793,6 +817,7 @@ impl LocalConnectionStrategy {
                                                 Some(2) => StepStatus::Done,
                                                 Some(3) => StepStatus::WaitingForUser,
                                                 Some(4) => StepStatus::Error,
+                                                Some(5) => StepStatus::TerminalError,
                                                 _ => StepStatus::Unknown,
                                             };
 
@@ -855,11 +880,21 @@ impl LocalConnectionStrategy {
                                                 let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
                                                 let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
                                                 break;
+                                             }
+
+                                            // Handle terminal errors — non-recoverable agent execution failure.
+                                            if status == StepStatus::TerminalError {
+                                                let err_msg = step_update.error_message.clone()
+                                                    .unwrap_or_else(|| "Terminal error occurred during execution".to_string());
+                                                let _ = step_tx.send(Err(
+                                                    AntigravityExecutionError { message: err_msg }.into()
+                                                ));
+                                                break;
                                             }
 
                                             // Dispatch post-tool-call or on-tool-error hooks for built-in tools
                                             let state_val = step_update.state.unwrap_or(0);
-                                            if state_val == 2 || state_val == 4 {
+                                            if state_val == 2 || state_val == 4 || state_val == 5 {
                                                 let mut pending = pending_builtin_tool_calls.lock().await;
                                                 if let (Some(tc), Some(runner)) = (pending.remove(&key), hook_runner.as_ref()) {
                                                     if state_val == 2 {
@@ -1386,4 +1421,12 @@ fn extract_tool_result(step_update: &crate::proto::localharness::StepUpdate) -> 
         result,
         error,
     })
+}
+
+/// Returns the Rust compiler version used to build this crate.
+fn rustc_version() -> String {
+    option_env!("RUSTC_VERSION")
+        .or(option_env!("CARGO_PKG_RUST_VERSION"))
+        .unwrap_or("unknown")
+        .to_string()
 }
