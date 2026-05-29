@@ -26,7 +26,7 @@ async fn test_agent_chat_integration() {
         api_key: Some("test_api_key".to_string()),
         models: ModelConfig {
             default: ModelEntry {
-                name: "gemini-2.5-flash".to_string(),
+                name: "gemini-3.5-flash".to_string(),
                 api_key: None,
                 generation: GenerationConfig {
                     thinking_level: None,
@@ -67,10 +67,12 @@ async fn test_agent_chat_integration() {
         .expect("Failed to chat with agent");
 
     // 3. Verify response
-    assert_eq!(
-        response.text,
-        "Hello from mock harness!How can I help you today?"
+    assert!(
+        response
+            .text
+            .contains("Client info language: rust, version:")
     );
+    assert!(response.text.contains("How can I help you today?"));
     assert_eq!(response.steps.len(), 2);
 
     // 4. Verify conversation metadata
@@ -180,5 +182,52 @@ async fn test_agent_real_chat_integration() {
     assert!(!conversation.conversation_id().is_empty());
 
     // 5. Stop agent
+    agent.stop().await.expect("Failed to stop agent");
+}
+
+#[tokio::test]
+async fn test_agent_terminal_error_propagation() {
+    let mut config = AgentConfig::default();
+
+    // Set up mock harness path
+    let harness_path = std::env::var("CARGO_BIN_EXE_mock_localharness")
+        .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`");
+
+    config.binary_path = Some(harness_path);
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        models: ModelConfig {
+            default: ModelEntry {
+                name: "gemini-3.5-flash".to_string(),
+                api_key: None,
+                generation: GenerationConfig {
+                    thinking_level: None,
+                },
+            },
+            image_generation: ModelEntry::default(),
+        },
+        ..Default::default()
+    };
+
+    config.capabilities = CapabilitiesConfig {
+        enabled_tools: Some(vec![BuiltinTools::ViewFile]),
+        disabled_tools: None,
+        compaction_threshold: None,
+        image_model: None,
+        finish_tool_schema_json: None,
+    };
+
+    config.policies = Some(vec![policy::allow_all()]);
+    config.conversation_id = Some("test_conv_err".to_string());
+
+    let agent = Agent::new(config);
+    let agent = agent.start().await.expect("Failed to start agent");
+
+    // Chat with agent triggering terminal error
+    let res = agent.chat("trigger_terminal_error").await;
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("Terminal execution error: Terminal error triggered by prompt"));
+
     agent.stop().await.expect("Failed to stop agent");
 }
