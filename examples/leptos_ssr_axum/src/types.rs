@@ -251,3 +251,7 @@ pub struct ConfirmPayload {
     pub tool_name: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AgentServerUrl(pub String);
+
+

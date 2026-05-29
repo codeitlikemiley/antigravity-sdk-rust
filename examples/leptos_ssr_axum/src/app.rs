@@ -18,8 +18,9 @@ use crate::types::{ChatSession, SessionIndex};
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
-    let agent_url = spin_sdk::variables::get("agent_server_url")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let agent_url = leptos::prelude::use_context::<crate::types::AgentServerUrl>()
+        .map(|url| url.0)
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
     view! {
         <!DOCTYPE html>
         <html lang="en">
@@ -211,6 +212,8 @@ fn ToolCallView(
     subagent_blocks: Vec<MessageBlock>,
     on_answer: Callback<(u64, Vec<QuestionResponse>, bool)>,
 ) -> impl IntoView {
+    let _ = id;
+    let _ = call_id;
     let args_str = serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
 
     // Prefer the human-readable label; fall back to raw tool name.
@@ -1019,7 +1022,7 @@ fn collect_subagents_recursive(blocks: &[MessageBlock]) -> Vec<SubagentInfo> {
             ..
         } = block {
             if name == "START_SUBAGENT" {
-                if let Some(ref traj_id) = subagent_trajectory_id {
+                if let Some(traj_id) = subagent_trajectory_id {
                     let prompt = args["prompt"].as_str().unwrap_or("Unknown Subagent").to_string();
                     
                     let mut step_count = 0;
@@ -1389,7 +1392,7 @@ fn update_subagent_blocks_impl(
             subagent_blocks,
             ..
         } = block {
-            if let Some(ref tid) = subagent_trajectory_id {
+            if let Some(tid) = subagent_trajectory_id.as_ref() {
                 if tid == traj_id {
                     f(subagent_blocks);
                     return true;
@@ -1880,7 +1883,7 @@ fn ChatPage() -> impl IntoView {
         let _ = &responses;
         let _ = cancelled;
         set_blocks.update(|bs| {
-            if let Some(MessageBlock::Question { ref mut answered, .. }) = bs.iter_mut().find(|b| match b {
+            if let Some(MessageBlock::Question { answered, .. }) = bs.iter_mut().find(|b| match b {
                 MessageBlock::Question { id, .. } => *id == block_id,
                 _ => false,
             }) {
@@ -2082,7 +2085,7 @@ fn ChatPage() -> impl IntoView {
                                             let text_to_push = data.text.clone();
                                             set_blocks.update(|bs| {
                                                 update_block_by_id_impl(bs, target_id, &mut |b| {
-                                                    if let MessageBlock::AssistantMessage { ref mut content, .. } = b {
+                                                    if let MessageBlock::AssistantMessage { content, .. } = b {
                                                         content.push_str(&text_to_push);
                                                     }
                                                 });
@@ -2106,7 +2109,7 @@ fn ChatPage() -> impl IntoView {
                                             }
                                             set_stream_text_buf.update(|s| s.push_str(&data.text));
                                             update_streaming_block(set_blocks, id_opt, |b| {
-                                                if let MessageBlock::AssistantMessage { ref mut content, .. } = b {
+                                                if let MessageBlock::AssistantMessage { content, .. } = b {
                                                     content.push_str(&data.text);
                                                 }
                                             });
@@ -2164,7 +2167,7 @@ fn ChatPage() -> impl IntoView {
                                             let text_to_push = data.text.clone();
                                             set_blocks.update(|bs| {
                                                 update_block_by_id_impl(bs, target_id, &mut |b| {
-                                                    if let MessageBlock::Thinking { ref mut content, .. } = b {
+                                                    if let MessageBlock::Thinking { content, .. } = b {
                                                         content.push_str(&text_to_push);
                                                     }
                                                 });
@@ -2188,7 +2191,7 @@ fn ChatPage() -> impl IntoView {
                                             }
                                             set_stream_think_buf.update(|s| s.push_str(&data.text));
                                             update_streaming_block(set_blocks, id_opt, |b| {
-                                                if let MessageBlock::Thinking { ref mut content, .. } = b {
+                                                if let MessageBlock::Thinking { content, .. } = b {
                                                     content.push_str(&data.text);
                                                 }
                                             });
@@ -2301,7 +2304,7 @@ fn ChatPage() -> impl IntoView {
                                             set_blocks.update(|bs| {
                                                 fn update_status_recursive(blocks: &mut Vec<MessageBlock>, cid: &str, err: bool) -> bool {
                                                     for b in blocks.iter_mut() {
-                                                        if let MessageBlock::ToolCall { call_id, ref mut status, subagent_blocks, .. } = b {
+                                                        if let MessageBlock::ToolCall { call_id, status, subagent_blocks, .. } = b {
                                                             if call_id == cid {
                                                                 *status = if err { ToolCallStatus::Error } else { ToolCallStatus::Done };
                                                                 return true;
@@ -2334,7 +2337,7 @@ fn ChatPage() -> impl IntoView {
                                             });
                                         } else {
                                             set_blocks.update(|bs| {
-                                                if let Some(MessageBlock::ToolCall { ref mut status, .. }) = bs.iter_mut().find(|b| match b {
+                                                if let Some(MessageBlock::ToolCall { status, .. }) = bs.iter_mut().find(|b| match b {
                                                     MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
                                                     _ => false,
                                                 }) {
@@ -2527,7 +2530,7 @@ fn ChatPage() -> impl IntoView {
                                             if data.status == "DONE" || data.status == "ERROR" {
                                                 set_blocks.update(|bs| {
                                                     for b in bs.iter_mut() {
-                                                        if let MessageBlock::Thinking { ref mut is_streaming, .. } = b {
+                                                        if let MessageBlock::Thinking { is_streaming, .. } = b {
                                                             *is_streaming = false;
                                                         }
                                                     }
@@ -3733,94 +3736,69 @@ fn NotFound() -> impl IntoView {
     view! { <h1 class="text-[#0d0d0d] dark:text-[#ececec] text-center py-20 text-2xl">"Not Found"</h1> }
 }
 
-/// Helper: send an HTTP POST request using wasi:http outgoing handler.
-///
-/// Generic transport function — sends to any HTTP endpoint via `wasi::http/outgoing-handler`.
 #[cfg(feature = "ssr")]
-fn send_wasi_http_post(
+async fn send_wasi_http_post(
     scheme: &str,
     authority: &str,
     path: &str,
     headers: &[(String, Vec<u8>)],
     body: &[u8],
 ) -> Result<(u16, Vec<u8>), String> {
-    use wasi::http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme};
+    struct SimpleBody(Option<bytes::Bytes>);
 
-    let wasi_headers = Fields::from_list(
-        &headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| format!("Failed to create headers: {e:?}"))?;
+    impl http_body::Body for SimpleBody {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
 
-    let outgoing_req = OutgoingRequest::new(wasi_headers);
-    outgoing_req
-        .set_method(&Method::Post)
-        .map_err(|_| "Failed to set method".to_string())?;
-
-    let wasi_scheme = if scheme == "https" {
-        Scheme::Https
-    } else {
-        Scheme::Http
-    };
-    outgoing_req
-        .set_scheme(Some(&wasi_scheme))
-        .map_err(|_| "Failed to set scheme".to_string())?;
-    outgoing_req
-        .set_authority(Some(authority))
-        .map_err(|_| "Failed to set authority".to_string())?;
-    outgoing_req
-        .set_path_with_query(Some(path))
-        .map_err(|_| "Failed to set path".to_string())?;
-
-    // Write body
-    let out_body = outgoing_req
-        .body()
-        .map_err(|_| "Failed to get body handle".to_string())?;
-    {
-        let stream = out_body
-            .write()
-            .map_err(|_| "Failed to get write stream".to_string())?;
-        stream
-            .blocking_write_and_flush(body)
-            .map_err(|e| format!("Failed to write body: {e:?}"))?;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(self.0.take().map(|data| Ok(http_body::Frame::data(data))))
+        }
     }
 
-    OutgoingBody::finish(out_body, None)
-        .map_err(|e| format!("Failed to finish body: {e:?}"))?;
+    let mut builder = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(format!("{}://{}{}", scheme, authority, path));
 
-    let future_response = wasi::http::outgoing_handler::handle(outgoing_req, None)
+    for (k, v) in headers {
+        builder = builder.header(k, &v[..]);
+    }
+
+    let http_req = builder
+        .body(SimpleBody(Some(bytes::Bytes::copy_from_slice(body))))
+        .map_err(|e| format!("Failed to build request: {e:?}"))?;
+
+    let wasi_req = wasip3::http_compat::http_into_wasi_request(http_req)
+        .map_err(|e| format!("Failed to convert request: {e:?}"))?;
+
+    let wasi_resp = wasip3::http::client::send(wasi_req)
+        .await
         .map_err(|e| format!("Failed to send request: {e:?}"))?;
 
-    // Block until response
-    let incoming_resp = loop {
-        if let Some(result) = future_response.get() {
-            break result
-                .map_err(|_| "Response already consumed".to_string())?
-                .map_err(|e| format!("HTTP error: {e:?}"))?;
-        }
-        future_response.subscribe().block();
-    };
+    let status = wasi_resp.get_status_code();
 
-    let status = incoming_resp.status();
-    let resp_body_handle = incoming_resp
-        .consume()
-        .map_err(|_| "Failed to consume body".to_string())?;
-    let resp_stream = resp_body_handle
-        .stream()
-        .map_err(|_| "Failed to get stream".to_string())?;
+    let http_resp = wasip3::http_compat::http_from_wasi_response(wasi_resp)
+        .map_err(|e| format!("Failed to convert response: {e:?}"))?;
 
-    let mut resp_bytes = Vec::new();
-    loop {
-        match resp_stream.blocking_read(65536) {
-            Ok(chunk) => resp_bytes.extend_from_slice(&chunk),
-            Err(wasi::io::streams::StreamError::Closed) => break,
-            Err(e) => return Err(format!("Failed to read response: {e:?}")),
+    use futures::future::poll_fn;
+    use http_body::Body;
+
+    let mut incoming_body = std::pin::pin!(http_resp.into_body());
+    let mut body_bytes = Vec::new();
+    while let Some(frame) = poll_fn(|cx| incoming_body.as_mut().poll_frame(cx)).await {
+        match frame {
+            Ok(f) => {
+                if let Some(data) = f.data_ref() {
+                    body_bytes.extend_from_slice(data);
+                }
+            }
+            Err(e) => return Err(format!("Failed to read response frame: {e:?}")),
         }
     }
 
-    Ok((status, resp_bytes))
+    Ok((status, body_bytes))
 }
 /// Send a message via the antigravity-sdk-rust Agent sidecar server (full SDK)
 ///
@@ -3829,11 +3807,12 @@ fn send_wasi_http_post(
 #[server(prefix = "/api")]
 pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<String>> {
     let agent_server_url = spin_sdk::variables::get("agent_server_url")
+        .await
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
 
     // Load chat history from KV store
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages").await {
         Ok(Some(msgs)) => msgs,
         _ => Vec::new(),
     };
@@ -3848,7 +3827,7 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
     let (scheme, authority) = parse_url_parts(&agent_server_url);
 
     let (status, resp_bytes) =
-        send_wasi_http_post(&scheme, &authority, "/chat", &headers, &body)?;
+        send_wasi_http_post(&scheme, &authority, "/chat", &headers, &body).await?;
 
     if status != 200 {
         let err_text = String::from_utf8_lossy(&resp_bytes);
@@ -3898,6 +3877,7 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
 
     store
         .set_json("chat_messages", &messages)
+        .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(assistant_msg)
@@ -3924,8 +3904,8 @@ fn parse_url_parts(url: &str) -> (String, String) {
 /// Get all chat messages from the KV store.
 #[server(prefix = "/api")]
 pub async fn get_messages() -> Result<Vec<ChatMessage>, ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    match store.get_json::<Vec<ChatMessage>>("chat_messages").await {
         Ok(Some(msgs)) => Ok(msgs),
         Ok(None) => Ok(Vec::new()),
         Err(e) => {
@@ -3938,8 +3918,8 @@ pub async fn get_messages() -> Result<Vec<ChatMessage>, ServerFnError<String>> {
 /// Clear all chat messages from the KV store.
 #[server(prefix = "/api")]
 pub async fn clear_messages() -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let _ = store.delete("chat_messages");
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let _ = store.delete("chat_messages").await;
     Ok(())
 }
 
@@ -4039,8 +4019,8 @@ pub async fn save_chat_turn(
     thinking: Option<String>,
     tool_calls: Option<Vec<ClientToolCall>>,
 ) -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let mut history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let mut history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages").await {
         Ok(Some(msgs)) => msgs,
         _ => Vec::new(),
     };
@@ -4071,6 +4051,7 @@ pub async fn save_chat_turn(
 
     store
         .set_json("chat_messages", &history)
+        .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(())
@@ -4079,31 +4060,31 @@ pub async fn save_chat_turn(
 /// List all chat sessions.
 #[server(prefix = "/api")]
 pub async fn list_sessions() -> Result<Vec<SessionMeta>, ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
 
     // Check if session_index exists, if not, migrate legacy
-    let index_exists = store.exists("session_index").unwrap_or(false);
+    let index_exists = store.exists("session_index").await.unwrap_or(false);
     if !index_exists {
-        let legacy_exists = store.exists("chat_messages").unwrap_or(false);
+        let legacy_exists = store.exists("chat_messages").await.unwrap_or(false);
         if legacy_exists {
-            migrate_legacy_messages(&store)?;
+            migrate_legacy_messages(&store).await?;
         } else {
             let empty = SessionIndex { sessions: Vec::new() };
-            store.set_json("session_index", &empty).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+            store.set_json("session_index", &empty).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
         }
     }
 
-    match store.get_json::<SessionIndex>("session_index") {
+    match store.get_json::<SessionIndex>("session_index").await {
         Ok(Some(idx)) => Ok(idx.sessions),
         _ => Ok(Vec::new()),
     }
 }
 
 #[cfg(feature = "ssr")]
-fn migrate_legacy_messages(
+async fn migrate_legacy_messages(
     store: &spin_sdk::key_value::Store,
 ) -> Result<(), ServerFnError<String>> {
-    let legacy: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+    let legacy: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages").await {
         Ok(Some(msgs)) => msgs,
         _ => Vec::new(),
     };
@@ -4137,6 +4118,7 @@ fn migrate_legacy_messages(
 
     store
         .set_json(format!("session_{}", &session.id), &session)
+        .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let index = SessionIndex {
@@ -4144,17 +4126,18 @@ fn migrate_legacy_messages(
     };
     store
         .set_json("session_index", &index)
+        .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
-    let _ = store.delete("chat_messages");
+    let _ = store.delete("chat_messages").await;
     Ok(())
 }
 
 /// Create a new session.
 #[server(prefix = "/api")]
 pub async fn create_session(title: Option<String>) -> Result<String, ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let mut idx = match store.get_json::<SessionIndex>("session_index") {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let mut idx = match store.get_json::<SessionIndex>("session_index").await {
         Ok(Some(idx)) => idx,
         _ => SessionIndex { sessions: Vec::new() },
     };
@@ -4177,10 +4160,10 @@ pub async fn create_session(title: Option<String>) -> Result<String, ServerFnErr
     };
 
     idx.sessions.insert(0, meta);
-    store.set_json("session_index", &idx).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json("session_index", &idx).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let session = ChatSession::new(session_id.clone());
-    store.set_json(format!("session_{}", session_id), &session).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json(format!("session_{}", session_id), &session).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(session_id)
 }
@@ -4188,27 +4171,27 @@ pub async fn create_session(title: Option<String>) -> Result<String, ServerFnErr
 /// Delete a session.
 #[server(prefix = "/api")]
 pub async fn delete_session(session_id: String) -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let mut idx = match store.get_json::<SessionIndex>("session_index") {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let mut idx = match store.get_json::<SessionIndex>("session_index").await {
         Ok(Some(idx)) => idx,
         _ => SessionIndex { sessions: Vec::new() },
     };
 
     idx.sessions.retain(|s| s.id != session_id);
-    store.set_json("session_index", &idx).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json("session_index", &idx).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
-    let _ = store.delete(&format!("session_{}", session_id));
+    let _ = store.delete(&format!("session_{}", session_id)).await;
     Ok(())
 }
 
 /// Rename a session.
 #[server(prefix = "/api")]
 pub async fn rename_session(session_id: String, new_title: String) -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
 
     // Update the session detail key
     let session_key = format!("session_{}", session_id);
-    if let Ok(Some(mut sess)) = store.get_json::<ChatSession>(&session_key) {
+    if let Ok(Some(mut sess)) = store.get_json::<ChatSession>(&session_key).await {
         sess.title = new_title.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4217,11 +4200,12 @@ pub async fn rename_session(session_id: String, new_title: String) -> Result<(),
         sess.updated_at = now;
         store
             .set_json(&session_key, &sess)
+            .await
             .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
     }
 
     // Update the session meta inside the index
-    let mut idx = match store.get_json::<SessionIndex>("session_index") {
+    let mut idx = match store.get_json::<SessionIndex>("session_index").await {
         Ok(Some(idx)) => idx,
         _ => SessionIndex { sessions: Vec::new() },
     };
@@ -4235,6 +4219,7 @@ pub async fn rename_session(session_id: String, new_title: String) -> Result<(),
         idx.sessions[pos].updated_at = now;
         store
             .set_json("session_index", &idx)
+            .await
             .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
     }
 
@@ -4245,8 +4230,8 @@ pub async fn rename_session(session_id: String, new_title: String) -> Result<(),
 /// Get all message blocks for a session.
 #[server(prefix = "/api")]
 pub async fn get_session_blocks(session_id: String) -> Result<Vec<MessageBlock>, ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    match store.get_json::<ChatSession>(&format!("session_{}", session_id)) {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    match store.get_json::<ChatSession>(&format!("session_{}", session_id)).await {
         Ok(Some(sess)) => Ok(sess.blocks),
         _ => Ok(Vec::new()),
     }
@@ -4255,8 +4240,8 @@ pub async fn get_session_blocks(session_id: String) -> Result<Vec<MessageBlock>,
 /// Save/update all blocks for a session, and auto-update title.
 #[server(prefix = "/api", input = leptos::server_fn::codec::Json)]
 pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    let mut sess = match store.get_json::<ChatSession>(&format!("session_{}", session_id)) {
+    let store = spin_sdk::key_value::Store::open_default().await.map_err(|e| e.to_string())?;
+    let mut sess = match store.get_json::<ChatSession>(&format!("session_{}", session_id)).await {
         Ok(Some(s)) => s,
         _ => ChatSession::new(session_id.clone()),
     };
@@ -4296,10 +4281,10 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
         }
     }
 
-    store.set_json(format!("session_{}", session_id), &sess).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json(format!("session_{}", session_id), &sess).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     // Also update session_index
-    let mut idx = match store.get_json::<SessionIndex>("session_index") {
+    let mut idx = match store.get_json::<SessionIndex>("session_index").await {
         Ok(Some(idx)) => idx,
         _ => SessionIndex { sessions: Vec::new() },
     };
@@ -4322,7 +4307,7 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
         });
     }
 
-    store.set_json("session_index", &idx).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json("session_index", &idx).await.map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(())
 }
@@ -4351,8 +4336,9 @@ fn get_agent_server_url_encoded(val: &str) -> String {
 fn get_agent_server_url_any() -> String {
     #[cfg(feature = "ssr")]
     {
-        spin_sdk::variables::get("agent_server_url")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+        leptos::prelude::use_context::<crate::types::AgentServerUrl>()
+            .map(|url| url.0)
+            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string())
     }
     #[cfg(not(feature = "ssr"))]
     {

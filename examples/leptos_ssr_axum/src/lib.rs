@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 
 mod app;
-mod types;
+pub mod types;
 
 #[cfg(feature = "ssr")]
 mod server;

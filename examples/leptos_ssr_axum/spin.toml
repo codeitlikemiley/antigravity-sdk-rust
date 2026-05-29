@@ -13,16 +13,17 @@ agent_server_url = { required = false, default = "http://127.0.0.1:8080" }
 [[trigger.http]]
 route = "/..."
 component = "leptos-ssr-axum"
+executor = { type = "http" }
 
 [component.leptos-ssr-axum]
-source = "target/wasm32-wasip1/release/leptos_ssr_axum.wasm"
+source = "target/wasm32-wasip2/release/leptos_ssr_axum.wasm"
 allowed_outbound_hosts = ["https://generativelanguage.googleapis.com", "http://127.0.0.1:8080"]
 key_value_stores = ["default"]
 [component.leptos-ssr-axum.variables]
 gemini_api_key = "{{ gemini_api_key }}"
 agent_server_url = "{{ agent_server_url }}"
 [component.leptos-ssr-axum.build]
-command = "cargo leptos build --release && LEPTOS_OUTPUT_NAME=leptos_ssr_axum cargo build --lib --target wasm32-wasip1 --release --no-default-features --features ssr"
+command = "WASI_RUNTIME=spin cargo leptos build --release && WASI_RUNTIME=spin LEPTOS_OUTPUT_NAME=leptos_ssr_axum cargo build --lib --target wasm32-wasip2 --release --no-default-features --features ssr"
 watch = ["src/**/*.rs", "Cargo.toml"]
 
 [[trigger.http]]
