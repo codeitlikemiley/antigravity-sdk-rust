@@ -100,6 +100,15 @@ pub struct GeminiConfig {
     /// Global API key for Gemini endpoints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// If true, uses the Vertex AI backend instead of Gemini Developer API.
+    #[serde(default)]
+    pub vertex: bool,
+    /// GCP Project ID for Vertex AI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// GCP Location/Region for Vertex AI (e.g., "us-central1").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     /// Model configurations.
     #[serde(default)]
     pub models: ModelConfig,
@@ -238,23 +247,41 @@ pub enum McpServerConfig {
     /// Launch the MCP server as a local stdio process.
     #[serde(rename = "stdio")]
     Stdio {
+        /// Unique identifier for this MCP server.
+        name: String,
         /// command binary.
         command: String,
         /// execution arguments.
         args: Vec<String>,
+        /// Explicit allowlist of tools to enable. Mutually exclusive with `disabled_tools`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enabled_tools: Option<Vec<String>>,
+        /// Explicit denylist of tools to disable. Mutually exclusive with `enabled_tools`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
     /// Connect to the MCP server via Server-Sent Events (SSE).
     #[serde(rename = "sse")]
     Sse {
+        /// Unique identifier for this MCP server.
+        name: String,
         /// HTTP URL endpoint.
         url: String,
         /// Additional HTTP headers.
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
+        /// Explicit allowlist of tools to enable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enabled_tools: Option<Vec<String>>,
+        /// Explicit denylist of tools to disable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
     /// Connect to the MCP server via standard HTTP.
     #[serde(rename = "http")]
     Http {
+        /// Unique identifier for this MCP server.
+        name: String,
         /// HTTP URL endpoint.
         url: String,
         /// Additional HTTP headers.
@@ -269,8 +296,41 @@ pub enum McpServerConfig {
         /// Flag whether to terminate the channel connection when closed.
         #[serde(default = "default_true")]
         terminate_on_close: bool,
+        /// Explicit allowlist of tools to enable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enabled_tools: Option<Vec<String>>,
+        /// Explicit denylist of tools to disable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
 }
+
+impl McpServerConfig {
+    /// Returns the unique name identifier of this MCP server.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stdio { name, .. } | Self::Sse { name, .. } | Self::Http { name, .. } => name,
+        }
+    }
+}
+
+/// Error raised when the agent execution encounters a terminal (non-recoverable) error.
+///
+/// This indicates that the agent loop has terminated due to a fatal error
+/// (e.g. model call failure, system constraint violation) and cannot continue.
+#[derive(Debug, Clone)]
+pub struct AntigravityExecutionError {
+    /// The error message describing the terminal failure.
+    pub message: String,
+}
+
+impl std::fmt::Display for AntigravityExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Terminal execution error: {}", self.message)
+    }
+}
+
+impl std::error::Error for AntigravityExecutionError {}
 
 const fn default_mcp_timeout() -> f64 {
     30.0
@@ -404,6 +464,9 @@ pub enum StepStatus {
     /// Execution was canceled.
     #[serde(rename = "CANCELED")]
     Canceled,
+    /// A fatal, non-recoverable error occurred during execution.
+    #[serde(rename = "TERMINAL_ERROR")]
+    TerminalError,
     /// Unknown status.
     #[serde(rename = "UNKNOWN")]
     Unknown,
@@ -695,6 +758,9 @@ mod tests {
     fn test_gemini_config_defaults() {
         let config = GeminiConfig::default();
         assert!(config.api_key.is_none());
+        assert!(!config.vertex);
+        assert!(config.project.is_none());
+        assert!(config.location.is_none());
         assert_eq!(config.models.default.name, DEFAULT_MODEL);
         assert!(config.models.default.generation.thinking_level.is_none());
         assert!(config.enable_google_search.is_none());

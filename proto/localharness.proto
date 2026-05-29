@@ -6,10 +6,17 @@ enum NullValue {
   NULL_VALUE = 0;
 }
 
+message ClientInfo {
+  optional string language = 1;
+  optional string version = 2;
+  optional string language_version = 3;
+}
+
 message InputConfig {
   optional string storage_directory = 1;
   optional uint32 port = 2;
   optional string bind_address = 3;
+  optional ClientInfo client_info = 4;
 }
 
 message InitializeConversationEvent {
@@ -50,6 +57,9 @@ message GeminiConfig {
   optional string thinking_level = 4;
   optional bool enable_url_context = 5;
   optional bool enable_google_search = 6;
+  optional bool use_vertex = 7;
+  optional string project = 8;
+  optional string location = 9;
 }
 
 message GemmaConfig {
@@ -173,6 +183,7 @@ message StepUpdate {
     STATE_DONE = 2;
     STATE_WAITING_FOR_USER = 3;
     STATE_ERROR = 4;
+    STATE_TERMINAL_ERROR = 5;
   }
 
   enum Source {
