@@ -603,7 +603,15 @@ fn get_default_binary_path() -> Option<String> {
     if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         return Some(path);
     }
-    // Check if it is in standard PATH
+    // Check ./bin/localharness relative to the current working directory
+    // (this is where `just install` / `scripts/install_harness.sh` places the binary)
+    if let Ok(cwd) = std::env::current_dir() {
+        let local_bin = cwd.join("bin").join("localharness");
+        if local_bin.exists() {
+            return Some(local_bin.to_string_lossy().into_owned());
+        }
+    }
+    // Check if it is in standard PATH (e.g. via `pip install google-antigravity`)
     if let Ok(paths) = std::env::var("PATH") {
         for path in std::env::split_paths(&paths) {
             let p = path.join("localharness");
