@@ -61,7 +61,9 @@ pub mod proto {
 
 pub mod agent;
 pub mod connection;
+pub mod context;
 pub mod conversation;
+pub mod error;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
@@ -69,9 +71,14 @@ pub mod local;
 pub mod wasm;
 
 pub mod policy;
+pub mod tool_context;
 pub mod tools;
+pub mod trigger_helpers;
 pub mod triggers;
 pub mod types;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod interactive;
 
 /// Helper to spawn asynchronous tasks in a target-agnostic manner.
 pub fn spawn_task<F>(future: F)
