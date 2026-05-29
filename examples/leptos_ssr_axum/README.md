@@ -24,7 +24,7 @@ Browser ──[HTTP/SSE]──→ Spin Component (WASI Guest)
 ## Prerequisites
 
 Ensure you have the following installed on your system:
-- **Rust** (with `wasm32-wasip1` and `wasm32-unknown-unknown` targets added).
+- **Rust** (with `wasm32-wasip2` and `wasm32-unknown-unknown` targets added).
 - **Spin CLI**: Install Spin by following the [Spin Installation Guide](https://developer.fermyon.com/spin/v2/install).
 - **cargo-leptos**: Install cargo-leptos using cargo:
   ```sh
@@ -73,7 +73,7 @@ spin build --up
 
 This will:
 1. Run `cargo leptos build --release` to compile client-side hydrate WASM assets and output-style CSS.
-2. Compile the server-side logic to the `wasm32-wasip1` target.
+2. Compile the server-side logic to the `wasm32-wasip2` target.
 3. Start the Spin local web server.
 
 Open `http://localhost:3000` (or the port outputted by Spin) in your web browser.
