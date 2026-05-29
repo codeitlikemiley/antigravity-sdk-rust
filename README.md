@@ -172,6 +172,159 @@ let policies = vec![
 ];
 ```
 
+### Error Handling
+
+The SDK provides a typed error hierarchy via `AntigravityError`:
+
+```rust,no_run
+use antigravity_sdk_rust::error::AntigravityError;
+
+// Three error categories:
+// - AntigravityError::Connection(msg) — network/transport failures
+// - AntigravityError::Execution(msg) — agent execution failures  
+// - AntigravityError::Validation { message, errors } — input validation failures
+```
+
+### Multimodal Content
+
+Send images, documents, audio, and video to the agent:
+
+```rust,no_run
+use antigravity_sdk_rust::types::{Content, Media, MimeType, ImageMime};
+
+// Text-only (backwards compatible)
+let response = agent.chat("What is 2+2?").await?;
+
+// From file (auto-detects MIME type from extension)
+let content = Content::from_file("photo.jpg", Some("Describe this")).unwrap();
+
+// From raw bytes
+let media = Media {
+    data: vec![0xFF, 0xD8, 0xFF],
+    mime_type: MimeType::Image(ImageMime::Jpeg),
+    description: Some("A photo".to_string()),
+};
+let content = Content::media(media);
+```
+
+Supported formats: BMP, JPEG, PNG, WebP (images), PDF, JSON, CSS, CSV, HTML, JS, TXT, RTF, XML (documents), WAV, MP3, AAC, OGG, FLAC, Opus, MPEG, M4A, L16 (audio), 3GPP, AVI, MP4, MPEG, MOV, WebM, WMV, FLV (video).
+
+### Lifecycle Hooks
+
+The full hook lifecycle is available:
+
+```rust,no_run
+use antigravity_sdk_rust::hooks::Hook;
+use antigravity_sdk_rust::types::{HookResult, ToolCall, ToolResult, ChatResponse};
+
+struct MyHook;
+
+impl Hook for MyHook {
+    // Session lifecycle
+    async fn on_session_start(&self) -> Result<(), anyhow::Error> { Ok(()) }
+    async fn on_session_end(&self) -> Result<(), anyhow::Error> { Ok(()) }
+    
+    // Turn lifecycle
+    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        Ok(HookResult { allow: true, message: String::new() })
+    }
+    async fn post_turn(&self, _response: &ChatResponse) -> Result<(), anyhow::Error> { Ok(()) }
+    
+    // Tool lifecycle
+    async fn pre_tool_call(&self, _call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+        Ok(HookResult { allow: true, message: String::new() })
+    }
+    async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> { Ok(()) }
+    
+    // History compaction
+    async fn on_compaction(&self, _summary: &str) -> Result<(), anyhow::Error> { Ok(()) }
+}
+```
+
+### Hook Context (Hierarchical State)
+
+Hooks can share state across lifecycle events via a parent-chaining key-value store:
+
+```rust,no_run
+use antigravity_sdk_rust::context::HookContext;
+use std::sync::Arc;
+
+// Session context (root)
+let session = Arc::new(HookContext::new());
+session.set("user_id", "u-123");
+
+// Turn context (inherits session)
+let turn = Arc::new(HookContext::child(session));
+turn.set("turn_count", 1i32);
+
+// get() walks up the chain:
+assert_eq!(turn.get::<String>("user_id"), Some("u-123".to_string()));
+```
+
+### Context-Aware Tools
+
+Tools can opt-in to receiving a `ToolContext` for session state and agent communication:
+
+```rust,no_run
+use antigravity_sdk_rust::tools::Tool;
+use antigravity_sdk_rust::tool_context::ToolContext;
+use serde_json::Value;
+
+struct StatefulTool;
+
+impl Tool for StatefulTool {
+    fn name(&self) -> &str { "stateful_tool" }
+    fn description(&self) -> &str { "A tool with session state" }
+    fn parameters_json_schema(&self) -> &str { r#"{"type":"object"}"# }
+
+    fn needs_context(&self) -> bool { true } // Opt-in
+
+    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
+        Ok(Value::Null) // Fallback
+    }
+
+    async fn call_with_context(
+        &self,
+        args: Value,
+        ctx: &ToolContext,
+    ) -> Result<Value, anyhow::Error> {
+        // Access session state
+        let count: i32 = ctx.get_state("call_count").unwrap_or(0);
+        ctx.set_state("call_count", count + 1);
+        Ok(serde_json::json!({ "calls": count + 1 }))
+    }
+}
+```
+
+### Trigger Helpers
+
+Convenience factories for common trigger patterns:
+
+```rust,no_run
+use antigravity_sdk_rust::trigger_helpers::every;
+use std::time::Duration;
+
+// Periodic trigger — fires every 30 seconds
+let heartbeat = every(Duration::from_secs(30), "check_status");
+```
+
+### Interactive Loop
+
+Built-in REPL for conversational agents:
+
+```rust,no_run
+use antigravity_sdk_rust::agent::Agent;
+use antigravity_sdk_rust::interactive::run_interactive_loop;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let agent = Agent::builder().allow_all().build().start().await?;
+    run_interactive_loop(&agent).await?;
+    agent.stop().await?;
+    Ok(())
+}
+```
+
 ### Google Search Grounding & Web Search Fallback
 
 The SDK supports server-side Google Search grounding and provides a client-side search fallback:
