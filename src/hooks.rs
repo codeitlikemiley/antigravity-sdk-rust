@@ -3,7 +3,9 @@
 //! This module defines the [`Hook`] trait, which allows implementing custom observers and middlewares
 //! to intercept session startup, pre/post tool invocations, execution errors, and user interactions.
 
-use crate::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
+use crate::types::{
+    AskQuestionEntry, ChatResponse, HookResult, QuestionHookResult, ToolCall, ToolResult,
+};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
@@ -76,6 +78,26 @@ pub trait Hook: Send + Sync {
     {
         async { Ok(None) }
     }
+    /// Triggered when the session is ending (agent shutdown or disconnect).
+    fn on_session_end(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
+    }
+    /// Triggered after a turn completes, receiving the full response.
+    fn post_turn<'a>(
+        &'a self,
+        _response: &'a ChatResponse,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
+    }
+    /// Triggered when the conversation history is compacted/summarized.
+    fn on_compaction<'a>(
+        &'a self,
+        _summary: &'a str,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// Object-safe version of the [`Hook`] trait, automatically implemented via a blanket impl.
@@ -111,6 +133,18 @@ pub trait DynHook: Send + Sync {
         &'a self,
         questions: &'a [AskQuestionEntry],
     ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>>;
+
+    /// Triggered when the session is ending.
+    fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+
+    /// Triggered after a turn completes.
+    fn post_turn<'a>(
+        &'a self,
+        response: &'a ChatResponse,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+
+    /// Triggered when the conversation history is compacted.
+    fn on_compaction<'a>(&'a self, summary: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 }
 
 impl<T: Hook + ?Sized> DynHook for T {
@@ -148,6 +182,21 @@ impl<T: Hook + ?Sized> DynHook for T {
         questions: &'a [AskQuestionEntry],
     ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>> {
         Box::pin(async move { self.on_interaction(questions).await })
+    }
+
+    fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_session_end().await })
+    }
+
+    fn post_turn<'a>(
+        &'a self,
+        response: &'a ChatResponse,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.post_turn(response).await })
+    }
+
+    fn on_compaction<'a>(&'a self, summary: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_compaction(summary).await })
     }
 }
 
@@ -256,6 +305,33 @@ impl HookRunner {
         }
         Ok(None)
     }
+
+    /// Dispatches `on_session_end` to all registered hooks.
+    pub async fn dispatch_session_end(&self) -> Result<(), anyhow::Error> {
+        let hooks = self.hooks.read().await.clone();
+        for hook in &hooks {
+            hook.on_session_end().await?;
+        }
+        Ok(())
+    }
+
+    /// Dispatches `post_turn` to all registered hooks.
+    pub async fn dispatch_post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
+        let hooks = self.hooks.read().await.clone();
+        for hook in &hooks {
+            hook.post_turn(response).await?;
+        }
+        Ok(())
+    }
+
+    /// Dispatches `on_compaction` to all registered hooks.
+    pub async fn dispatch_on_compaction(&self, summary: &str) -> Result<(), anyhow::Error> {
+        let hooks = self.hooks.read().await.clone();
+        for hook in &hooks {
+            hook.on_compaction(summary).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -267,7 +343,7 @@ mod tests {
         clippy::field_reassign_with_default
     )]
     use super::*;
-    use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult};
+    use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult, UsageMetadata};
     use std::sync::Mutex;
 
     struct TrackerHook {
@@ -371,6 +447,30 @@ mod tests {
             } else {
                 Ok(None)
             }
+        }
+
+        async fn on_session_end(&self) -> Result<(), anyhow::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:session_end", self.name));
+            Ok(())
+        }
+
+        async fn post_turn(&self, _response: &ChatResponse) -> Result<(), anyhow::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:post_turn", self.name));
+            Ok(())
+        }
+
+        async fn on_compaction(&self, _summary: &str) -> Result<(), anyhow::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:on_compaction", self.name));
+            Ok(())
         }
     }
 
@@ -574,5 +674,74 @@ mod tests {
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded, vec!["h1:on_interaction", "answer:on_interaction"]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_session_end() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = HookRunner::new();
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+
+        runner.dispatch_session_end().await.unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["h1:session_end", "h2:session_end"]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_post_turn() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = HookRunner::new();
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+
+        let response = ChatResponse {
+            text: "hello".to_string(),
+            thinking: String::new(),
+            steps: vec![],
+            usage_metadata: UsageMetadata::default(),
+        };
+        runner.dispatch_post_turn(&response).await.unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["h1:post_turn"]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_on_compaction() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = HookRunner::new();
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+
+        runner.dispatch_on_compaction("summary text").await.unwrap();
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded, vec!["h1:on_compaction", "h2:on_compaction"]);
     }
 }

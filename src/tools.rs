@@ -4,6 +4,7 @@
 //! API requests) to be registered with the agent and executed when requested by the model.
 //! Registration and concurrent execution is managed via [`ToolRunner`].
 
+use crate::tool_context::ToolContext;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,6 +30,24 @@ pub trait Tool: Send + Sync {
         &self,
         args: Value,
     ) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send;
+
+    /// Returns `true` if this tool requires a [`ToolContext`] to be injected.
+    /// Defaults to `false` for backwards compatibility.
+    fn needs_context(&self) -> bool {
+        false
+    }
+
+    /// Executes the tool with access to the session-scoped [`ToolContext`].
+    ///
+    /// Only called when [`needs_context()`](Tool::needs_context) returns `true`.
+    /// The default implementation ignores the context and delegates to [`call()`](Tool::call).
+    fn call_with_context(
+        &self,
+        args: Value,
+        _context: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
+        self.call(args)
+    }
 }
 
 /// Object-safe version of the [`Tool`] trait, automatically implemented via a blanket impl.
@@ -46,6 +65,16 @@ pub trait DynTool: Send + Sync {
 
     /// Executes the tool with the given JSON arguments.
     fn call(&self, args: Value) -> BoxFuture<'_, Result<Value, anyhow::Error>>;
+
+    /// Returns `true` if this tool requires a `ToolContext`.
+    fn needs_context(&self) -> bool;
+
+    /// Executes the tool with a `ToolContext`.
+    fn call_with_context<'a>(
+        &'a self,
+        args: Value,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<Value, anyhow::Error>>;
 }
 
 impl<T: Tool + ?Sized> DynTool for T {
@@ -63,6 +92,18 @@ impl<T: Tool + ?Sized> DynTool for T {
 
     fn call(&self, args: Value) -> BoxFuture<'_, Result<Value, anyhow::Error>> {
         Box::pin(async move { self.call(args).await })
+    }
+
+    fn needs_context(&self) -> bool {
+        Tool::needs_context(self)
+    }
+
+    fn call_with_context<'a>(
+        &'a self,
+        args: Value,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<Value, anyhow::Error>> {
+        Box::pin(async move { self.call_with_context(args, context).await })
     }
 }
 
