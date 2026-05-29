@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// The default model name used when none is specified.
 pub const DEFAULT_MODEL: &str = "gemini-3.5-flash";
@@ -630,6 +631,363 @@ pub enum StreamChunk {
     ToolCall(ToolCall),
 }
 
+// ─── Multimodal Content Types ───────────────────────────────────────────────
+
+/// Supported MIME types for image media.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ImageMime {
+    /// BMP image.
+    #[serde(rename = "image/bmp")]
+    Bmp,
+    /// JPEG image.
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    /// PNG image.
+    #[serde(rename = "image/png")]
+    Png,
+    /// WebP image.
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+/// Supported MIME types for document media.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DocumentMime {
+    /// PDF document.
+    #[serde(rename = "application/pdf")]
+    Pdf,
+    /// JSON data.
+    #[serde(rename = "application/json")]
+    Json,
+    /// CSS stylesheet.
+    #[serde(rename = "text/css")]
+    Css,
+    /// CSV tabular data.
+    #[serde(rename = "text/csv")]
+    Csv,
+    /// HTML page.
+    #[serde(rename = "text/html")]
+    Html,
+    /// JavaScript source.
+    #[serde(rename = "application/javascript")]
+    Javascript,
+    /// Plain text.
+    #[serde(rename = "text/plain")]
+    PlainText,
+    /// RTF document.
+    #[serde(rename = "text/rtf")]
+    Rtf,
+    /// XML data.
+    #[serde(rename = "application/xml")]
+    Xml,
+}
+
+/// Supported MIME types for audio media.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AudioMime {
+    /// WAV audio.
+    #[serde(rename = "audio/wav")]
+    Wav,
+    /// MP3 audio.
+    #[serde(rename = "audio/mp3")]
+    Mp3,
+    /// AAC audio.
+    #[serde(rename = "audio/aac")]
+    Aac,
+    /// OGG audio.
+    #[serde(rename = "audio/ogg")]
+    Ogg,
+    /// FLAC audio.
+    #[serde(rename = "audio/flac")]
+    Flac,
+    /// Opus audio.
+    #[serde(rename = "audio/opus")]
+    Opus,
+    /// MPEG audio.
+    #[serde(rename = "audio/mpeg")]
+    Mpeg,
+    /// M4A audio.
+    #[serde(rename = "audio/m4a")]
+    M4a,
+    /// L16 raw audio.
+    #[serde(rename = "audio/l16")]
+    L16,
+}
+
+/// Supported MIME types for video media.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VideoMime {
+    /// 3GPP video.
+    #[serde(rename = "video/3gpp")]
+    Threegpp,
+    /// AVI video.
+    #[serde(rename = "video/x-msvideo")]
+    Avi,
+    /// MP4 video.
+    #[serde(rename = "video/mp4")]
+    Mp4,
+    /// MPEG video.
+    #[serde(rename = "video/mpeg")]
+    VideoMpeg,
+    /// MPG video.
+    #[serde(rename = "video/mpg")]
+    Mpg,
+    /// `QuickTime` video.
+    #[serde(rename = "video/quicktime")]
+    Quicktime,
+    /// `WebM` video.
+    #[serde(rename = "video/webm")]
+    Webm,
+    /// WMV video.
+    #[serde(rename = "video/x-ms-wmv")]
+    Wmv,
+    /// FLV video.
+    #[serde(rename = "video/x-flv")]
+    XFlv,
+}
+
+/// Validated MIME type for any supported media category.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum MimeType {
+    /// Image MIME type.
+    Image(ImageMime),
+    /// Document MIME type.
+    Document(DocumentMime),
+    /// Audio MIME type.
+    Audio(AudioMime),
+    /// Video MIME type.
+    Video(VideoMime),
+}
+
+impl MimeType {
+    /// Returns the MIME type string.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Image(m) => match m {
+                ImageMime::Bmp => "image/bmp",
+                ImageMime::Jpeg => "image/jpeg",
+                ImageMime::Png => "image/png",
+                ImageMime::Webp => "image/webp",
+            },
+            Self::Document(m) => match m {
+                DocumentMime::Pdf => "application/pdf",
+                DocumentMime::Json => "application/json",
+                DocumentMime::Css => "text/css",
+                DocumentMime::Csv => "text/csv",
+                DocumentMime::Html => "text/html",
+                DocumentMime::Javascript => "application/javascript",
+                DocumentMime::PlainText => "text/plain",
+                DocumentMime::Rtf => "text/rtf",
+                DocumentMime::Xml => "application/xml",
+            },
+            Self::Audio(m) => match m {
+                AudioMime::Wav => "audio/wav",
+                AudioMime::Mp3 => "audio/mp3",
+                AudioMime::Aac => "audio/aac",
+                AudioMime::Ogg => "audio/ogg",
+                AudioMime::Flac => "audio/flac",
+                AudioMime::Opus => "audio/opus",
+                AudioMime::Mpeg => "audio/mpeg",
+                AudioMime::M4a => "audio/m4a",
+                AudioMime::L16 => "audio/l16",
+            },
+            Self::Video(m) => match m {
+                VideoMime::Threegpp => "video/3gpp",
+                VideoMime::Avi => "video/x-msvideo",
+                VideoMime::Mp4 => "video/mp4",
+                VideoMime::VideoMpeg => "video/mpeg",
+                VideoMime::Mpg => "video/mpg",
+                VideoMime::Quicktime => "video/quicktime",
+                VideoMime::Webm => "video/webm",
+                VideoMime::Wmv => "video/x-ms-wmv",
+                VideoMime::XFlv => "video/x-flv",
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for MimeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A validated media payload with raw bytes and MIME type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Media {
+    /// Raw binary data of the media file.
+    pub data: Vec<u8>,
+    /// Validated MIME type.
+    pub mime_type: MimeType,
+    /// Optional human-readable description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// An image media payload.
+pub type Image = Media;
+
+/// A document media payload.
+pub type Document = Media;
+
+/// An audio media payload.
+pub type Audio = Media;
+
+/// A video media payload.
+pub type Video = Media;
+
+/// A single content primitive for agent prompts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContentPrimitive {
+    /// Plain text content.
+    Text(String),
+    /// Binary media content (image, document, audio, or video).
+    Media(Media),
+}
+
+/// Agent prompt content — a single primitive or a list of primitives.
+///
+/// Use `Content::from("text")` or `"text".into()` for simple text prompts.
+/// Use `Content::from_file("image.png", None)` for media files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Content {
+    /// A single content primitive.
+    Single(ContentPrimitive),
+    /// Multiple content primitives (e.g., text + image).
+    Multi(Vec<ContentPrimitive>),
+}
+
+impl Content {
+    /// Creates a text-only content.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self::Single(ContentPrimitive::Text(s.into()))
+    }
+
+    /// Creates content from a media payload.
+    pub const fn media(media: Media) -> Self {
+        Self::Single(ContentPrimitive::Media(media))
+    }
+
+    /// Reads a file and auto-detects the MIME type to construct the appropriate media content.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or the MIME type is unsupported.
+    pub fn from_file(path: impl AsRef<Path>, description: Option<&str>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mime_type = mime_from_extension(&ext)
+            .ok_or_else(|| format!("Unsupported file extension: .{ext}"))?;
+
+        Ok(Self::Single(ContentPrimitive::Media(Media {
+            data,
+            mime_type,
+            description: description.map(String::from),
+        })))
+    }
+
+    /// Returns the text content if this is a single text primitive.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Single(ContentPrimitive::Text(s)) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+impl From<&str> for Content {
+    fn from(s: &str) -> Self {
+        Self::text(s)
+    }
+}
+
+impl From<String> for Content {
+    fn from(s: String) -> Self {
+        Self::text(s)
+    }
+}
+
+/// Resolves a file extension to a validated `MimeType`.
+fn mime_from_extension(ext: &str) -> Option<MimeType> {
+    match ext {
+        // Images
+        "bmp" => Some(MimeType::Image(ImageMime::Bmp)),
+        "jpg" | "jpeg" => Some(MimeType::Image(ImageMime::Jpeg)),
+        "png" => Some(MimeType::Image(ImageMime::Png)),
+        "webp" => Some(MimeType::Image(ImageMime::Webp)),
+        // Documents
+        "pdf" => Some(MimeType::Document(DocumentMime::Pdf)),
+        "json" => Some(MimeType::Document(DocumentMime::Json)),
+        "css" => Some(MimeType::Document(DocumentMime::Css)),
+        "csv" => Some(MimeType::Document(DocumentMime::Csv)),
+        "html" | "htm" => Some(MimeType::Document(DocumentMime::Html)),
+        "js" | "mjs" => Some(MimeType::Document(DocumentMime::Javascript)),
+        "txt" | "text" | "md" | "log" => Some(MimeType::Document(DocumentMime::PlainText)),
+        "rtf" => Some(MimeType::Document(DocumentMime::Rtf)),
+        "xml" => Some(MimeType::Document(DocumentMime::Xml)),
+        // Audio
+        "wav" => Some(MimeType::Audio(AudioMime::Wav)),
+        "mp3" => Some(MimeType::Audio(AudioMime::Mp3)),
+        "aac" => Some(MimeType::Audio(AudioMime::Aac)),
+        "ogg" | "oga" => Some(MimeType::Audio(AudioMime::Ogg)),
+        "flac" => Some(MimeType::Audio(AudioMime::Flac)),
+        "opus" => Some(MimeType::Audio(AudioMime::Opus)),
+        "m4a" => Some(MimeType::Audio(AudioMime::M4a)),
+        // Video
+        "3gp" | "3gpp" => Some(MimeType::Video(VideoMime::Threegpp)),
+        "avi" => Some(MimeType::Video(VideoMime::Avi)),
+        "mp4" | "m4v" => Some(MimeType::Video(VideoMime::Mp4)),
+        "mpeg" | "mpg" => Some(MimeType::Video(VideoMime::VideoMpeg)),
+        "mov" => Some(MimeType::Video(VideoMime::Quicktime)),
+        "webm" => Some(MimeType::Video(VideoMime::Webm)),
+        "wmv" => Some(MimeType::Video(VideoMime::Wmv)),
+        "flv" => Some(MimeType::Video(VideoMime::XFlv)),
+        _ => None,
+    }
+}
+
+// ─── Trigger & File Change Types ────────────────────────────────────────────
+
+/// Controls when trigger notifications are delivered to the agent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerDelivery {
+    /// Deliver the notification immediately, even if the agent is busy.
+    SendImmediately,
+    /// Wait until the agent is idle before delivering.
+    WaitIdle,
+}
+
+/// The kind of filesystem change detected by a file-watching trigger.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FileChangeKind {
+    /// A new file was created.
+    Added,
+    /// An existing file was modified.
+    Modified,
+    /// A file was deleted.
+    Deleted,
+}
+
+/// A single filesystem change event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    /// The type of change.
+    pub kind: FileChangeKind,
+    /// The path of the affected file.
+    pub path: String,
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -780,5 +1138,178 @@ mod tests {
         assert!(config.enabled_tools.is_none());
         assert!(config.disabled_tools.is_none());
         assert!(config.compaction_threshold.is_none());
+    }
+
+    #[test]
+    fn test_content_from_str() {
+        let content: Content = "hello".into();
+        assert_eq!(content.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_content_from_string() {
+        let content: Content = String::from("world").into();
+        assert_eq!(content.as_text(), Some("world"));
+    }
+
+    #[test]
+    fn test_content_text_constructor() {
+        let content = Content::text("test");
+        assert_eq!(content.as_text(), Some("test"));
+    }
+
+    #[test]
+    fn test_content_media_has_no_text() {
+        let media = Media {
+            data: vec![0xFF, 0xD8],
+            mime_type: MimeType::Image(ImageMime::Jpeg),
+            description: None,
+        };
+        let content = Content::media(media);
+        assert_eq!(content.as_text(), None);
+    }
+
+    #[test]
+    fn test_mime_from_extension_images() {
+        assert_eq!(
+            mime_from_extension("png"),
+            Some(MimeType::Image(ImageMime::Png))
+        );
+        assert_eq!(
+            mime_from_extension("jpg"),
+            Some(MimeType::Image(ImageMime::Jpeg))
+        );
+        assert_eq!(
+            mime_from_extension("jpeg"),
+            Some(MimeType::Image(ImageMime::Jpeg))
+        );
+        assert_eq!(
+            mime_from_extension("webp"),
+            Some(MimeType::Image(ImageMime::Webp))
+        );
+        assert_eq!(
+            mime_from_extension("bmp"),
+            Some(MimeType::Image(ImageMime::Bmp))
+        );
+    }
+
+    #[test]
+    fn test_mime_from_extension_documents() {
+        assert_eq!(
+            mime_from_extension("pdf"),
+            Some(MimeType::Document(DocumentMime::Pdf))
+        );
+        assert_eq!(
+            mime_from_extension("json"),
+            Some(MimeType::Document(DocumentMime::Json))
+        );
+        assert_eq!(
+            mime_from_extension("txt"),
+            Some(MimeType::Document(DocumentMime::PlainText))
+        );
+        assert_eq!(
+            mime_from_extension("md"),
+            Some(MimeType::Document(DocumentMime::PlainText))
+        );
+    }
+
+    #[test]
+    fn test_mime_from_extension_audio() {
+        assert_eq!(
+            mime_from_extension("mp3"),
+            Some(MimeType::Audio(AudioMime::Mp3))
+        );
+        assert_eq!(
+            mime_from_extension("wav"),
+            Some(MimeType::Audio(AudioMime::Wav))
+        );
+        assert_eq!(
+            mime_from_extension("flac"),
+            Some(MimeType::Audio(AudioMime::Flac))
+        );
+    }
+
+    #[test]
+    fn test_mime_from_extension_video() {
+        assert_eq!(
+            mime_from_extension("mp4"),
+            Some(MimeType::Video(VideoMime::Mp4))
+        );
+        assert_eq!(
+            mime_from_extension("webm"),
+            Some(MimeType::Video(VideoMime::Webm))
+        );
+        assert_eq!(
+            mime_from_extension("mov"),
+            Some(MimeType::Video(VideoMime::Quicktime))
+        );
+    }
+
+    #[test]
+    fn test_mime_from_extension_unsupported() {
+        assert_eq!(mime_from_extension("xyz"), None);
+        assert_eq!(mime_from_extension(""), None);
+    }
+
+    #[test]
+    fn test_mime_type_display() {
+        let m = MimeType::Image(ImageMime::Png);
+        assert_eq!(m.to_string(), "image/png");
+        assert_eq!(m.as_str(), "image/png");
+    }
+
+    #[test]
+    fn test_content_from_file_missing() {
+        let result = Content::from_file("/nonexistent/file.png", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_content_from_file_unsupported_ext() {
+        // Create a temp file with unsupported extension
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_antigravity.xyz");
+        std::fs::write(&path, b"data").unwrap();
+        let result = Content::from_file(&path, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unsupported"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_content_from_file_success() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_antigravity.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        let result = Content::from_file(&path, Some("test doc"));
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        // It should be a media content, not text
+        assert_eq!(content.as_text(), None);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_trigger_delivery_serialization() {
+        let d = TriggerDelivery::SendImmediately;
+        let json_str = serde_json::to_string(&d).unwrap();
+        assert_eq!(json_str, "\"send_immediately\"");
+    }
+
+    #[test]
+    fn test_file_change_kind_serialization() {
+        let k = FileChangeKind::Modified;
+        let json_str = serde_json::to_string(&k).unwrap();
+        assert_eq!(json_str, "\"modified\"");
+    }
+
+    #[test]
+    fn test_file_change_construction() {
+        let fc = FileChange {
+            kind: FileChangeKind::Added,
+            path: "/tmp/new_file.txt".to_string(),
+        };
+        assert!(matches!(fc.kind, FileChangeKind::Added));
+        assert_eq!(fc.path, "/tmp/new_file.txt");
     }
 }
