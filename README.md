@@ -106,6 +106,7 @@ async fn main() -> Result<(), anyhow::Error> {
         Some(tool_runner),
         None,
         "my_conversation_id".to_string(),
+        vec![], // MCP servers
     );
 
     let connection = strategy.connect().await?;
@@ -325,6 +326,78 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 ```
 
+### MCP Integration
+
+Connect to external MCP servers and expose their tools to the agent:
+
+```rust,no_run
+use antigravity_sdk_rust::agent::Agent;
+use antigravity_sdk_rust::types::McpServerConfig;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let agent = Agent::builder()
+        .mcp_server(McpServerConfig::Stdio {
+            name: "my_server".to_string(),
+            command: "npx".to_string(),
+            args: vec!["my-mcp-server".to_string()],
+            enabled_tools: None,
+            disabled_tools: None,
+        })
+        .allow_all()
+        .build();
+
+    let agent = agent.start().await?;
+    let response = agent.chat("Use the MCP tools to help me.").await?;
+    println!("{}", response.text);
+    agent.stop().await?;
+    Ok(())
+}
+```
+
+Three transport types are supported:
+- **`McpServerConfig::Stdio`** — launch a local subprocess (e.g., `npx`, `uvx`)
+- **`McpServerConfig::Sse`** — connect via Server-Sent Events
+- **`McpServerConfig::Http`** — connect via standard HTTP with configurable timeouts
+
+Each variant supports `enabled_tools` / `disabled_tools` for fine-grained tool filtering.
+
+### Sugared Thoughts & Tool Call Streams (Advanced)
+
+For more complex use cases, stream internal model reasoning/thinking and intercept tool call dispatches in real-time using `StreamChunk`:
+
+```rust,no_run
+use antigravity_sdk_rust::agent::Agent;
+use antigravity_sdk_rust::types::StreamChunk;
+use futures_util::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let agent = Agent::builder().allow_all().build().start().await?;
+    let conversation = agent.conversation();
+    let mut stream = conversation.chat("Explain quantum computing").await?;
+
+    while let Some(chunk_res) = stream.next().await {
+        match chunk_res? {
+            // 1. Stream reasoning/thinking deltas
+            StreamChunk::Thought { text, .. } => {
+                eprint!("💭 {}", text); // show thinking in grey/stderr
+            }
+            // 2. Stream response text tokens
+            StreamChunk::Text { text, .. } => {
+                print!("{}", text);
+            }
+            // 3. Stream strongly-typed ToolCall events
+            StreamChunk::ToolCall(call) => {
+                println!("\n🔧 Executing: {} (args: {})", call.name, call.args);
+            }
+        }
+    }
+    agent.stop().await?;
+    Ok(())
+}
+```
+
 ### Google Search Grounding & Web Search Fallback
 
 The SDK supports server-side Google Search grounding and provides a client-side search fallback:
@@ -446,6 +519,18 @@ This project uses [just](https://github.com/casey/just) to manage development ta
   ```sh
   just publish
   ```
+
+## Component Documentation
+
+For more detailed documentation on specific components, see:
+
+- **[Agent](docs/agent.md)** — High-level, batteries-included entry point.
+- **[Connections](docs/connections.md)** — Transport and backend abstraction.
+- **[Conversation](docs/conversation.md)** — Stateful session management.
+- **[Hooks](docs/hooks.md)** — Agent lifecycle interception and policies.
+- **[MCP](docs/mcp.md)** — Model Context Protocol integration.
+- **[Tools](docs/tools.md)** — In-process tool execution.
+- **[Triggers](docs/triggers.md)** — Background tasks and external events.
 
 ## Architecture
 
