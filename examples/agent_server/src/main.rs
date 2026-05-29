@@ -569,6 +569,7 @@ async fn chat_stream_handler(
                                         }
                                     } else if step.status == StepStatus::Done
                                         || step.status == StepStatus::Error
+                                        || step.status == StepStatus::TerminalError
                                     {
                                         // If this tool was never seen as Active (e.g. auto-approved
                                         // non-WRITE_TOOLS like LIST_DIR that go straight from
@@ -657,6 +658,7 @@ async fn chat_stream_handler(
                                 StepStatus::Error          => Some("ERROR"),
                                 StepStatus::WaitingForUser => Some("WAITING_FOR_USER"),
                                 StepStatus::Canceled       => Some("CANCELED"),
+                                StepStatus::TerminalError  => Some("TERMINAL_ERROR"),
                                 StepStatus::Unknown        => None,
                             };
                             if let Some(status) = status_str {

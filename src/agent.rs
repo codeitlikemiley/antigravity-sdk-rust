@@ -286,7 +286,7 @@ impl Agent<Unstarted> {
             }
 
             if !final_policies.is_empty() {
-                let enforcer = Arc::new(PolicyEnforcer::new(final_policies));
+                let enforcer = Arc::new(PolicyEnforcer::new(final_policies, Vec::new()));
                 self.hook_runner.register(enforcer).await;
             }
 
