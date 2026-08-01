@@ -3,7 +3,7 @@
 **Status:** audit complete, migration not started.
 **Parity target:** upstream `0.1.9`.
 **Port baseline:** upstream `0.1.1` (+ a `ClientInfo` back-port from 0.1.2) — what this crate was written against.
-**Audit date:** 2026-08-01. Eight subsystem audits, each adversarially verified against the extracted wheels and the decoded harness descriptors, then the load-bearing claims reproduced against the shipped 0.1.9 harness binary (§2).
+**Audit date:** 2026-08-01. Nine subsystem audits, each adversarially verified against the extracted wheels and the decoded harness descriptors, then the load-bearing claims reproduced against the shipped 0.1.9 harness binary (§2). 258 findings survived verification: 31 breaking, 62 high, 107 medium, 58 low.
 
 This document replaces the first-pass parity note. Several of that note's claims are false and are corrected below (see [Corrections to the first-pass audit](#corrections-to-the-first-pass-audit)).
 
@@ -236,6 +236,8 @@ Effort: XS ≤ 1h · S ≤ half a day · M ≤ 2 days · L ≤ 1 week · XL > 1 
 | X17 | docs | `SKILL.md:53-92` uses 21 `file:///Volumes/goldcoders/...` absolute links; `plugin.json` claims Apache-2.0 / author "Google" for an MIT repo | `skills/` | XS |
 | X18 | docs | `examples/README.md:9` misdescribes `hello_world`; wasip1 vs wasip2 inconsistency; no example constructs `WasmConnectionStrategy` at all despite the SDK being an optional dep of `leptos_ssr_axum` | examples | S |
 | X19 | tests | No example or test exercises context-aware tools, which is why T1 went unnoticed | `examples/`, `tests/` | S |
+
+> The types / model-configuration subsystem was audited separately and its 56 findings (`MC-*`, `CT-*`) are tabled in **§4.8** rather than repeated here.
 
 ### Completeness pass
 
@@ -475,6 +477,140 @@ The single highest-leverage addition is a scheduled **upstream-drift job**: fetc
 
 **Do not bump the pin first.** The 0.1.1 pin is currently the only reason the SDK works at all; bumping it in isolation trips every breaking finding above. Correct sequence: add the README incompatibility warning **now**; bump `VERSION` in the same commit as the proto regeneration; add a `HARNESS_VERSION` const plus a startup check so a mismatch fails loudly instead of hanging.
 
+### 4.8 Types and model configuration
+
+This subsystem was audited separately (the first pass over it died mid-run). 56 findings, 7 breaking. It is the detail WP-4 is implemented from, so the wire shapes are given exactly.
+
+#### The 0.1.9 type graph
+
+`models.py`, re-exported through `types.py:32-38` and `__init__.py`:
+
+```
+DEFAULT_MODEL                  = "gemini-3.6-flash"              models.py:35   (was 3.5-flash through 0.1.7)
+DEFAULT_IMAGE_GENERATION_MODEL = "gemini-3.1-flash-lite-image"   models.py:36   (was -flash-image-preview through 0.1.6)
+ThinkingLevel   = minimal | low | medium | high | extra_high     models.py:44-63  (extra_high added 0.1.7)
+ModelType       = text | image                                   models.py:66-70
+ModelEndpoint   { base_url, http_headers, validate_endpoint() }  models.py:73-82   (abstract)
+  GeminiAPIEndpoint { api_key, options: GeminiModelOptions }     models.py:91-106
+  VertexEndpoint    { project, location, options }               models.py:109-128
+GeminiModelOptions { thinking_level }                            models.py:85-88
+ModelTarget     { name: str|None, types=[TEXT], endpoint|None }  models.py:131-138
+RetryConfig     { api_retry, model_output_retry } + .benchmark() types.py:355-417
+```
+
+`LocalAgentConfig` keeps the shorthand fields `model`, `models`, `api_key`, `vertex`, `project`, `location` (`local_connection_config.py:169-174`) and normalises them into `models` in a post-init validator (`:297-301`).
+
+#### The exact wire (`HarnessConfig.models`, field 15, protojson camelCase)
+
+| Case | Emitted |
+|---|---|
+| no config at all | `[{"name":"gemini-3.6-flash","types":["MODEL_TYPE_TEXT"],"geminiApiEndpoint":{}}, {"name":"gemini-3.1-flash-lite-image","types":["MODEL_TYPE_IMAGE"],"geminiApiEndpoint":{}}]` — two entries, endpoint present but **empty** (`local_connection_test.py:3523-3532`) |
+| `api_key="k"`, `model="m"` | the same two entries, `"geminiApiEndpoint":{"apiKey":"k"}` on **both** (`:1128-1144`) |
+| `vertex=True, project, location` | `"vertexEndpoint":{"project":"p","location":"l"}` on both (`:1146-1161`) |
+| separate image model | explicit `ModelTarget(types=[IMAGE])`; the default **text** model is then auto-appended *after* it (`:3544-3554`) |
+| thinking level | `"geminiApiEndpoint":{"options":{"thinkingLevel":"high"}}`; `options` is omitted entirely when every field is `None` (`local_connection.py:140-146`) |
+| OpenAI / Ollama-compatible | `gemmaEndpoint:{baseUrl}` — emitted by `LocalOpenAIConnectionStrategy`, not by `build_models_proto` (`local_openai_connection.py:44-57`) |
+| bare strategy, no models | `models` **empty** — a valid state; the backend then chooses everything (`:1118-1126`, `local_connection.py:1060-1061`) |
+
+Two easy traps: `VertexEndpoint.options` is field **5**, not 4; and `ModelTarget.name` is `str | None`, serialised as `""` — an empty name is meaningful, not an error (`:1213-1224`).
+
+#### The merge algorithm (`_merge_models_list`, `local_connection_config.py:268-296`)
+
+Concatenate **explicit `models`** → **shorthand `model`** → **defaults**, in that order. Then take the union of `ModelType`s already present and append each default model *only* if none of its types is already covered. Dedupe is by **ModelType, never by name** — two TEXT models are legal. The shorthand endpoint (`_build_shorthand_endpoint`: `VertexEndpoint` if `vertex` else always `GeminiAPIEndpoint(api_key)`) attaches to the shorthand model and to the defaults, but **never** to explicitly-supplied `models` entries — an explicit entry with `endpoint=None` raises (`local_connection.py:1060-1073`).
+
+#### Environment variables
+
+Upstream reads more than we do, and reads them in different places: `GEMINI_API_KEY` only inside `GeminiAPIEndpoint.validate_endpoint` as a **presence check** (`models.py:101`) — it is never copied onto the wire, so an env-only setup emits `"geminiApiEndpoint": {}` and the harness picks the key up from the inherited process environment; `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` hydrate a `VertexEndpoint` (`models.py:116-124`, 0.1.7); `GOOGLE_GENAI_USE_VERTEXAI` / `GOOGLE_GENAI_USE_ENTERPRISE` (`"true"`/`"1"`) flip `vertex` (`local_connection_config.py:206-211`, 0.1.7). Rust reads only `GEMINI_API_KEY` (`src/local.rs:396`) plus a non-upstream `ANTIGRAVITY_API_KEY` (`src/wasm.rs:100`), and copies the resolved key into the proto (`:415,:566`).
+
+#### Two defaults that are less safe than upstream
+
+- **CT-009 (high).** `CapabilitiesConfig` derives `Default`, which `src/agent.rs:205-237` and `src/local.rs:609-624` both read as *all ten* built-in tools — including `RunCommand`, `EditFile` and `CreateFile`. Upstream's default is `CapabilitiesConfig(enabled_tools=BuiltinTools.read_only())` (`connection.py:52-56` in 0.1.9, **and identically at 0.1.1** `connection.py:43-47`). So `Agent::builder().allow_all().build()` — the crate-level doc example at `src/lib.rs:29-32` — starts with unrestricted write and shell tools where the Python equivalent starts read-only. This is an original port divergence, not drift, and it compounds S1 and S4.
+- **CT-032 (medium).** `HookResult` derives `Default`, and Rust's derived `bool` default is `false`, so `HookResult::default()` — and every `HookResult { message, ..Default::default() }` — **denies**. Upstream's default is `allow=True` (`types.py:715-726`, same at 0.1.1). The crate's own test at `src/types.rs:1087-1091` documents the wrong behaviour as if it were intended.
+
+#### `read_only()` — what is and is not broken
+
+`BuiltinTools::read_only()` (`src/types.rs:213-221`) returns four tools; upstream's has included `FINISH` since 0.1.1 and gained `READ_URL_CONTENT` in 0.1.6. The audit's stronger reading — that `AgentBuilder::read_only()` therefore denies the `finish` tool and the agent cannot terminate — does **not** hold on the current code: `finish` never becomes a `ToolCall` (`src/local.rs` maps it to `StepType::Finish` at `:789` and never routes it through `extract_builtin_tool_call`), so the `deny_all()` prefix built at `src/agent.rs:592-604` never sees it. What *is* real today is narrower: `has_write_tools` (`src/agent.rs:239-240`) is permanently true, because `Finish` is always in `active_tools` and never in `read_only()`. The list must still be corrected before harness-side pre-tool gating lands, at which point `finish` *would* be gated.
+
+#### Findings
+
+**Breaking**
+
+| ID | What | Where in Rust | Effort |
+|---|---|---|---|
+| CT-011 | McpServerConfig never reaches the wire — builder accepts servers, LocalConnectionStrategy stores them, nothing emits them | `src/agent.rs:48-49, 563-572 (mcp_server/mcp_servers builders); src/agent.rs:365; src/loc…` | L |
+| MC-01 | ModelTarget / ModelEndpoint / GeminiModelOptions type graph is entirely absent from src/types.rs | `src/types.rs:41-116 (ModelEntry/ModelConfig/GeminiConfig) — no ModelTarget, no endpoint …` | L |
+| MC-02 | ModelType (TEXT/IMAGE) discriminator missing — Rust cannot declare an image model on the wire | `src/types.rs:62-95 — ModelConfig encodes purpose structurally as two named slots (`defau…` | S |
+| MC-03 | src/types.rs GeminiConfig is a 0.1.1 type whose backing proto message no longer exists | `src/types.rs:98-122 (pub struct GeminiConfig); src/agent.rs:23 + 467-470; src/local.rs:3…` | L |
+| MC-04 | ModelEntry / ModelConfig{default,image_generation} / GenerationConfig were deleted upstream in 0.1.4; Rust still models the world this way | `src/types.rs:33-36 (GenerationConfig), :41-60 (ModelEntry + Default), :64-95 (ModelConfi…` | M |
+| MC-08 | The explicit/shorthand/default model merge algorithm does not exist in Rust — only one model is ever configured and the image model is never sent as a model | `src/local.rs:565-586 and src/wasm.rs:201-222 build exactly one config object from `gemin…` | M |
+| MC-09 | CapabilitiesConfig.image_model writes GenerateImageToolConfig.model_name, a field reserved upstream since 0.1.4 | `src/types.rs:239-241 (`pub image_model: Option<String>`); emitted at src/local.rs:655-65…` | S |
+
+**High**
+
+| ID | What | Where in Rust | Effort |
+|---|---|---|---|
+| CT-001 | Content / ContentPrimitive / Media are dead types: multimodal prompts cannot be sent at all | `src/types.rs:841-905 (ContentPrimitive, Content, Content::from_file); src/agent.rs:403 (…` | L |
+| CT-002 | SlashCommand / BuiltinSlashCommandName (0.1.2) missing entirely — a Rust user cannot send /plan | `src/types.rs:843-861 (ContentPrimitive has only Text and Media); proto/localharness.prot…` | M |
+| CT-003 | BuiltinTools emits SCREAMING_SNAKE identifiers where upstream uses lowercase snake_case tool names | `src/types.rs:163-211 (#[serde(rename = "CREATE_FILE")] ... and as_str() returning "CREAT…` | M |
+| CT-004 | BuiltinTools enum missing ASK_QUESTION, SEARCH_WEB (0.1.4) and READ_URL_CONTENT (0.1.6) | `src/types.rs:163-194 (10 variants only); src/local.rs:597-608 and src/agent.rs:208-233 a…` | M |
+| CT-007 | CapabilitiesConfig.image_model retained and emitted on GenerateImageToolConfig.model_name, a field the harness reserved in 0.1.4 | `src/types.rs:239-241 (pub image_model: Option<String>); src/local.rs:655-658 and src/was…` | S |
+| CT-009 | Default capabilities are all-tools-enabled; upstream defaults an agent to read-only tools | `src/types.rs:225-232 (#[derive(Default)] with enabled_tools/disabled_tools = None); src/…` | S |
+| CT-013 | SubagentConfig / SubagentCapabilities (0.1.5) absent — static subagents cannot be declared | `src/types.rs (no such types); src/agent.rs:18-50 (AgentConfig has no subagents field); p…` | L |
+| MC-05 | DEFAULT_MODEL is two releases stale: gemini-3.5-flash vs gemini-3.6-flash | `src/types.rs:12 `pub const DEFAULT_MODEL: &str = "gemini-3.5-flash";` (used at src/types…` | XS |
+| MC-07 | ThinkingLevel is missing the EXTRA_HIGH variant added in 0.1.7, and `rename_all = "lowercase"` cannot produce "extra_high" | `src/types.rs:18-29 (`#[serde(rename_all = "lowercase")] pub enum ThinkingLevel { Minimal…` | XS |
+| MC-11 | Vertex validation is wrong: Rust accepts an API-key-only Vertex config, upstream requires both project AND location | `src/local.rs:404-413` | S |
+| MC-12 | GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION env vars are never read | `src/local.rs:388-413 reads only GEMINI_API_KEY (:396); src/wasm.rs:93-106 reads ANTIGRAV…` | XS |
+| MC-15 | No base_url / http_headers support — custom, proxied and OpenAI-compatible endpoints are impossible | `src/local.rs:567 `base_url: None,` and src/wasm.rs:203 `base_url: None,` — hardcoded; sr…` | M |
+| MC-17 | AgentBuilder exposes the removed model surface (.gemini_config/.api_key/.default_model) and none of the current one | `src/agent.rs:467-479 — only `gemini_config(GeminiConfig)`, `api_key(impl Into<String>)`,…` | M |
+
+**Medium**
+
+| ID | What | Where in Rust | Effort |
+|---|---|---|---|
+| CT-005 | BuiltinTools::read_only() diverges from upstream: FINISH (present since 0.1.1) and READ_URL_CONTENT (0.1.6) missing | `src/types.rs:213-221 (read_only() -> vec![FindFile, ListDir, ViewFile, SearchDir]); src/…` | XS |
+| CT-006 | BuiltinTools missing the nondestructive() / all_tools() / file_tools() / none() constructors | `src/types.rs:196-222 (only as_str() and read_only())` | S |
+| CT-008 | CapabilitiesConfig missing enable_subagents | `src/types.rs:225-242 (CapabilitiesConfig has enabled_tools, disabled_tools, compaction_t…` | XS |
+| CT-010 | McpServerConfig::Sse variant still exists and is documented, but upstream deleted McpSseServer in 0.1.2 | `src/types.rs:264-280 (McpServerConfig::Sse { name, url, headers, enabled_tools, disabled…` | XS |
+| CT-012 | McpServerConfig missing stdio env (0.1.4), timeout_seconds (0.1.3), auth_provider_type, and the name regex validation | `src/types.rs:245-316` | M |
+| CT-014 | Media has no per-category MIME validation: Image, Document, Audio and Video are the same type | `src/types.rs:817-838 (struct Media + `pub type Image = Media; pub type Document = Media;…` | M |
+| CT-015 | Four MIME type strings are wrong and the 0.1.9 audio additions are missing | `src/types.rs:672 (Javascript => "application/javascript"), 681 (Xml => "application/xml"…` | S |
+| CT-018 | StepType::THINKING (0.1.5) missing, and local.rs never classifies a thinking-only step | `src/types.rs:394-414 (StepType has TextResponse, ToolCall, SystemMessage, Compaction, Fi…` | XS |
+| CT-019 | StepStatus::TerminalError and STATE_TERMINAL_ERROR=5 are dead — removed upstream in 0.1.3 | `src/types.rs:468-470 (StepStatus::TerminalError); src/local.rs:824 (Some(5) => StepStatu…` | S |
+| CT-020 | UsageMetadata uses non-optional i32 counters, conflating "not reported" with an explicit zero | `src/types.rs:377-391 (prompt_token_count: i32, candidates_token_count: i32, total_token_…` | S |
+| CT-023 | ToolCall and ToolResult missing server_name (0.1.6); ToolResult missing exception | `src/types.rs:347-358 (ToolCall: id, name, args, canonical_path); src/types.rs:361-374 (T…` | M |
+| CT-024 | ToolCall.id and ToolCall.args are required in Rust but optional/defaulted upstream | `src/types.rs:347-358 (pub id: String; pub args: Value — neither Option nor #[serde(defau…` | M |
+| CT-025 | ToolExecutionError (0.1.9) missing from the error surface | `src/error.rs:17-34 (AntigravityError has only Connection, Execution, Validation); src/ty…` | S |
+| CT-026 | AntigravityCancelledError (0.1.2) and ChatResponse::cancel() (0.1.2) missing | `src/error.rs:17-34; src/types.rs:600-610 (ChatResponse is a plain struct); src/connectio…` | M |
+| CT-027 | ChatResponse.usage_metadata reports cumulative session usage, not the turn's usage | `src/types.rs:600-610 (ChatResponse.usage_metadata: UsageMetadata); src/conversation.rs:3…` | XS |
+| CT-028 | SessionContinuationMode (0.1.7) missing from types and from HarnessConfig | `src/types.rs (absent); src/agent.rs:42-43 (only conversation_id); proto/localharness.pro…` | M |
+| CT-029 | RetryConfig / ModelAPIRetryConfig / ModelOutputRetryConfig (0.1.9) missing | `src/types.rs (absent); src/agent.rs:18-50; proto/localharness.proto:26-41` | M |
+| CT-030 | DEFAULT_MODEL and DEFAULT_IMAGE_GENERATION_MODEL are stale by two releases | `src/types.rs:12 (DEFAULT_MODEL = "gemini-3.5-flash"); src/types.rs:15 (DEFAULT_IMAGE_GEN…` | XS |
+| CT-031 | ThinkingLevel missing EXTRA_HIGH (0.1.7), and its serde rename_all would mis-encode it | `src/types.rs:18-29 (#[serde(rename_all = "lowercase")] enum ThinkingLevel { Minimal, Low…` | XS |
+| CT-032 | HookResult::default() denies where upstream's default allows | `src/types.rs:546-553 (#[derive(Default)] on HookResult); src/types.rs:1087-1091 (test as…` | XS |
+| MC-06 | DEFAULT_IMAGE_GENERATION_MODEL is stale: gemini-3.1-flash-image-preview vs gemini-3.1-flash-lite-image | `src/types.rs:15 `pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gemini-3.1-flash-imag…` | XS |
+| MC-10 | RetryConfig / ModelAPIRetryConfig / ModelOutputRetryConfig are completely missing from the Rust SDK | `no occurrence of RetryConfig anywhere in /home/user/antigravity-sdk-rust/src or /home/us…` | M |
+| MC-13 | GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE do not switch the Rust SDK to Vertex | `src/types.rs:105-106 (`#[serde(default)] pub vertex: bool`) — a plain bool with no tri-s…` | XS |
+| MC-16 | GeminiConfig.enable_google_search / enable_url_context are dead — the message that carried them no longer exists and upstream Python never set them | `src/types.rs:116-121 (pub enable_google_search / enable_url_context on GeminiConfig); em…` | S |
+| MC-19 | ModelTarget.name is optional upstream and the model list may legitimately be empty; Rust forces a non-empty name and always sends exactly one model | `src/types.rs:41-49 (`ModelEntry.name: String`, non-optional, defaulted to DEFAULT_MODEL …` | S |
+| MC-21 | Docs, examples, skills and integration tests all teach the removed 0.1.1 model API | `docs/agent.md:113, :141, :620-665, :695; docs/connections.md:146, :164-171, :206-209, :2…` | M |
+
+**Low**
+
+| ID | What | Where in Rust | Effort |
+|---|---|---|---|
+| CT-016 | from_bytes (0.1.5) has no Rust equivalent | `src/types.rs:863-905 (Content only offers text(), media(), from_file(), as_text())` | S |
+| CT-017 | Content::from_file uses a hand-rolled extension table instead of MIME inference, accepting and rejecting different file sets than upstream | `src/types.rs:878-896 (from_file), 920-956 (mime_from_extension)` | S |
+| CT-021 | UsageMetadata has no addition operator (0.1.8) — accumulation is open-coded in Conversation | `src/types.rs:377-391 (no impl std::ops::Add); src/conversation.rs:172-186` | XS |
+| CT-022 | Rust proto narrows UsageMetadata counters to int32 where the harness declares uint64 | `proto/localharness.proto:453-459 (optional int32 for all five fields)` | S |
+| CT-033 | SystemInstructionSection.title has no default and the builder rejects a bare string | `src/types.rs:125-131 (SystemInstructionSection { content: String, title: String }); src/…` | S |
+| CT-034 | CustomSystemInstructions.Part.template (SystemInstructionTemplate + Arg) absent from the Rust proto | `proto/localharness.proto:77-85 (Part oneof has only text = 1); src/types.rs:134-138 (Cus…` | XS |
+| CT-035 | ToolOutputTruncation (HarnessConfig field 18) is absent from the Rust proto; upstream Python does not expose it either | `proto/localharness.proto:26-41 (HarnessConfig ends at field 12); src/types.rs (no such t…` | S |
+| MC-14 | GEMINI_API_KEY is copied into the proto rather than left empty, and src/wasm.rs invents an ANTIGRAVITY_API_KEY env var upstream has never had | `src/local.rs:389-397 and :566 (`api_key: Some(api_key)`); src/wasm.rs:93-106 and :202` | S |
+| MC-18 | Model-config-to-proto logic is duplicated between src/local.rs and src/wasm.rs (refactor guidance for the MC-01/MC-08 rewrite, not an independent parity gap) | `src/local.rs:565-586 vs src/wasm.rs:201-222 (identical ProtoGeminiConfig construction); …` | S |
+| MC-20 | GeminiModelOptions must be omitted when every option is None — a naive Rust port would emit an empty options object | `no equivalent — src/local.rs:569-580 writes `thinking_level: Option<String>` directly on…` | XS |
+
+MC-01…MC-04, MC-08, MC-19 and MC-20 are the substance of WP-4 and should be read as its specification. CT-011 (MCP never reaching the wire) is the same defect as W6, found independently from the types side. CT-009 and CT-032 belong in WP-3 with the other security-posture fixes — neither is blocked on the migration.
+
 ---
 
 ## 5. Work plan
@@ -533,7 +669,7 @@ Effort: S ≤ 2 days · M ≤ 1 week · L ≤ 2 weeks · XL > 2 weeks.
 
 **Files.** `src/policy.rs`, `src/agent.rs`, `src/local.rs`, `src/wasm.rs`, `src/hooks.rs`, new `src/wire_path.rs`, `docs/policy.md`.
 
-**Closes.** S1, S2, S3, S4, S5, S7, S12, S13, S14, S15, S16, S17, C20, N8.
+**Closes.** S1, S2, S3, S4, S5, S7, S12, S13, S14, S15, S16, S17, C20, N8, CT-005, CT-006, CT-009, CT-032.
 
 **Work.**
 1. **S1:** `secure_normalize_path` + `is_path_in_workspace` with component-wise comparison, fail-closed on `io::Error`, optional case-insensitivity probe. Rewrite the `is_outside_workspace` closure.
@@ -555,7 +691,7 @@ Effort: S ≤ 2 days · M ≤ 1 week · L ≤ 2 weeks · XL > 2 weeks.
 
 **Files.** new `src/harness_config.rs`, `src/local.rs`, `src/wasm.rs`, `src/types.rs`, `src/agent.rs`.
 
-**Closes.** W3, W9, W18, W19, X1 (config half), X7 (constants), X10, N1, N2, N5, N7.
+**Closes.** W3, W9, W18, W19, X1 (config half), X7 (constants), X10, N1, N2, N5, N7, and the model-config block of §4.8: MC-01…MC-06, MC-08…MC-21, CT-029, CT-030, CT-031.
 
 **Work.**
 1. Extract `build_harness_config(&…) -> HarnessConfig` into a target-agnostic module (see the `src/lib.rs:68-71` cfg constraint) and delete the duplicate in `src/wasm.rs:150-311`.
@@ -660,7 +796,7 @@ Effort: S ≤ 2 days · M ≤ 1 week · L ≤ 2 weeks · XL > 2 weeks.
 
 **Files.** `src/types.rs`, `src/agent.rs`, `src/local.rs`, `src/wasm.rs`, `src/harness_config.rs`.
 
-**Closes.** W6, W13, W16, W17, W21, W26, W27, A13, T2, T11, S8.
+**Closes.** W6, W13, W16, W17, W21, W26, W27, A13, T2, T11, S8, CT-003, CT-004, CT-008, CT-010, CT-011, CT-012, CT-013.
 
 **Work.** MCP servers on the wire (field 14) with stdio `env`, `timeout_seconds` and both transports; `BuiltinTools` gains `AskQuestion`/`SearchWeb`/`ReadUrlContent` and `all_tools()` replaces the three hardcoded lists; `search_web`/`read_url_content` configs; `user_questions.enabled` gated on `AskQuestion`; `enable_subagents`; `SubagentConfig`/`SubagentCapabilities` + `custom_subagents = 17` with all three upstream validations; `RetryConfig` (emit only when a sub-message is populated, per `local_connection.py:116-121`); `tool_output_truncation`; the lowercase tool-identifier rename with `from_wire_name()` (S8) landed together with `src/policy.rs`, docs and examples.
 
