@@ -78,6 +78,60 @@ pub enum AnyConnection {
     Mock(std::sync::Arc<MockConnection>),
 }
 
+/// A non-owning handle to a connection.
+///
+/// The tool runner is owned by the connection, and a [`ToolContext`] handed to
+/// a tool points back at that connection — holding it strongly would make a
+/// reference cycle that never frees the session. Tools upgrade on use and see
+/// `None` once the agent has stopped.
+///
+/// [`ToolContext`]: crate::tool_context::ToolContext
+#[derive(Clone)]
+pub enum WeakConnection {
+    #[cfg(not(target_arch = "wasm32"))]
+    Local(std::sync::Weak<crate::local::LocalConnection>),
+    #[cfg(target_arch = "wasm32")]
+    Wasm(std::sync::Weak<crate::wasm::WasmConnection>),
+    #[cfg(test)]
+    Mock(std::sync::Weak<MockConnection>),
+}
+
+impl std::fmt::Debug for WeakConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WeakConnection")
+    }
+}
+
+impl WeakConnection {
+    /// Returns a live connection, or `None` if the session has ended.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<AnyConnection> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.upgrade().map(AnyConnection::Local),
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.upgrade().map(AnyConnection::Wasm),
+            #[cfg(test)]
+            Self::Mock(c) => c.upgrade().map(AnyConnection::Mock),
+        }
+    }
+}
+
+impl AnyConnection {
+    /// Produces a non-owning handle to this connection.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakConnection {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => WeakConnection::Local(std::sync::Arc::downgrade(c)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => WeakConnection::Wasm(std::sync::Arc::downgrade(c)),
+            #[cfg(test)]
+            Self::Mock(c) => WeakConnection::Mock(std::sync::Arc::downgrade(c)),
+        }
+    }
+}
+
 impl std::fmt::Debug for AnyConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

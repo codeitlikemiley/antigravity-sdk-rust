@@ -352,6 +352,11 @@ impl Agent<Unstarted> {
                     crate::connection::AnyConnection::Wasm(Arc::new(conn)),
                     None,
                 ));
+                self.tool_runner
+                    .set_context(Arc::new(crate::tool_context::ToolContext::new(
+                        conversation.connection().downgrade(),
+                    )))
+                    .await;
 
                 // 7. Start triggers
                 let mut trigger_runner = None;
@@ -408,6 +413,14 @@ impl Agent<Unstarted> {
                     None,
                 ));
                 conversation.seed_history(replayed).await;
+                // Tools that ask for a context can only get one now the
+                // connection exists. Weak, so the runner the connection owns
+                // does not keep the connection alive through this handle.
+                self.tool_runner
+                    .set_context(Arc::new(crate::tool_context::ToolContext::new(
+                        conversation.connection().downgrade(),
+                    )))
+                    .await;
 
                 // 7. Start triggers
                 let trigger_runner = if self.config.triggers.is_empty() {

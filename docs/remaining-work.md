@@ -72,7 +72,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 |---|---|---|
 | ~~S2~~ | **Done** — `HookRunner::gate_tool_call` is the single decision point at both transports and both call sites; a hook that errors denies and the model is told the gate could not decide | S |
 | H4 | Narrow `on_tool_error`: never clear the error, never downgrade the step. It currently reports a failed tool to the model as a genuine success | M |
-| T1+T9 | Construct and inject the `ToolContext` — it is never constructed today, so context-aware tools do not work at all | S |
+| ~~T1+T9~~ | **Done** — `Agent::start` attaches a `ToolContext` built on a new `WeakConnection`, so context-aware tools work and the context does not keep the session alive | S |
 | ~~A1~~ | **Done** — `stop`/`is_running`/double-start guard, and `Agent::stop` stops triggers before disconnecting | M |
 | ~~A10~~ | **Done** — `TriggerContext::send` is the whole surface | S |
 
@@ -199,7 +199,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
 | D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
 | D4 | Tool runner — **T7+T8, T10, `finish-extractor` done**; T4 (schema coercion) remains | T7+T8, T4, T10, `finish-extractor` | M |
-| D5 | `ToolContext` | T1+T9, `tool-context-state-atomicity`, X19 | M |
+| D5 | `ToolContext` — **T1+T9 and state atomicity done**; X19's example remains (unit tests cover the behaviour) | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | ~~D6~~ | Triggers — **done** | A10, A1, A11 | M |
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
 | D8 | Remaining hook signatures | H1b, H1d+H16 | S |

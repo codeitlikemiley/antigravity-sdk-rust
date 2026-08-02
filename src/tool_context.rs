@@ -4,8 +4,8 @@
 //! and the ability to send messages to the agent. State is scoped to the
 //! session and is independent of `HookContext`.
 
-use crate::connection::AnyConnection;
 use crate::connection::Connection;
+use crate::connection::WeakConnection;
 use anyhow::Result;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -24,32 +24,46 @@ use std::sync::Mutex;
 /// This separation is intentional (see hooks/README.md in the Python SDK).
 #[derive(Debug)]
 pub struct ToolContext {
-    connection: AnyConnection,
+    connection: WeakConnection,
     state: Mutex<HashMap<String, Value>>,
 }
 
 impl ToolContext {
-    /// Creates a new `ToolContext` wrapping the given connection.
-    pub fn new(connection: AnyConnection) -> Self {
+    /// Creates a new `ToolContext` holding a non-owning handle to the session.
+    ///
+    /// Weak by construction: the connection owns the tool runner, and a strong
+    /// handle back would keep the session alive forever.
+    pub fn new(connection: WeakConnection) -> Self {
         Self {
             connection,
             state: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Returns the conversation ID for the current session.
-    pub fn conversation_id(&self) -> &str {
-        self.connection.conversation_id()
+    /// Returns the conversation ID, or `None` once the session has ended.
+    pub fn conversation_id(&self) -> Option<String> {
+        self.connection
+            .upgrade()
+            .map(|c| c.conversation_id().to_string())
     }
 
-    /// Returns whether the agent is currently idle (not processing).
-    pub fn is_idle(&self) -> bool {
-        self.connection.is_idle()
+    /// Returns whether the agent is currently idle, or `None` once the session
+    /// has ended.
+    pub fn is_idle(&self) -> Option<bool> {
+        self.connection.upgrade().map(|c| c.is_idle())
     }
 
     /// Sends a trigger notification message to the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session has ended or the message cannot be sent.
     pub async fn send(&self, message: &str) -> Result<()> {
-        self.connection.send_trigger_notification(message).await
+        let connection = self
+            .connection
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the session has ended"))?;
+        connection.send_trigger_notification(message).await
     }
 
     /// Retrieves a previously stored value by key.
@@ -99,8 +113,7 @@ impl ToolContext {
 }
 
 /// The read-modify-write half of [`ToolContext::update_state`], separated so it
-/// can be tested without a live connection — constructing a `ToolContext`
-/// requires one, which is also why nothing currently constructs one (audit T1).
+/// can be tested without a live connection.
 fn update_locked<T, F>(state: &Mutex<HashMap<String, Value>>, key: &str, transform: F)
 where
     T: Serialize + DeserializeOwned,

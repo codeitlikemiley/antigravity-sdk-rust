@@ -127,7 +127,9 @@ impl Tool for CounterTool {
     fn needs_context(&self) -> bool { true } // Opt-in
 
     async fn call(&self, _args: Value) -> Result<Value, anyhow::Error> {
-        Ok(Value::Null) // Fallback when no context
+        // Never reached: a `needs_context` tool called without a context is an
+        // error result, not a silent fallback.
+        unreachable!()
     }
 
     async fn call_with_context(
@@ -147,13 +149,23 @@ impl Tool for CounterTool {
 ```rust,no_run
 pub struct ToolContext {
     // Methods:
-    fn conversation_id(&self) -> &str;
-    fn is_idle(&self) -> bool;
+    fn conversation_id(&self) -> Option<String>;
+    fn is_idle(&self) -> Option<bool>;
     async fn send(&self, message: &str) -> Result<()>;
     fn get_state<T: DeserializeOwned>(&self, key: &str) -> Option<T>;
     fn set_state<T: Serialize>(&self, key: &str, value: T);
+    fn update_state<T, F>(&self, key: &str, transform: F); // atomic read-modify-write
 }
 ```
+
+The context holds a **weak** handle to the session — the connection owns the
+tool runner, so a strong one would be a cycle that never frees. The two
+`Option`-returning methods are `None`, and `send` errors, once the agent has
+stopped.
+
+`Agent::start()` attaches the context. A `needs_context` tool invoked with none
+attached returns an error result rather than falling back to `call()`, which
+would run the tool in a subtly different mode.
 
 > **Note**: Tool state is independent of Hook state. They use separate stores.
 
@@ -173,6 +185,7 @@ The SDK provides these built-in tools (managed by the harness):
 | `StartSubagent` | Launch sub-agents |
 | `GenerateImage` | Generate images |
 | `Finish` | Signal task completion |
+| `AskQuestion` | Put a multiple-choice question to the user |
 | `GrepSearch` | Grep-based search |
 
 ### Read-Only Tools
