@@ -90,7 +90,9 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
                 "directory_path": list.directory_path,
             }),
         )
-    } else if let Some(ref img_gen) = step_update.generate_image {
+    } else {
+        // Last arm: a step carrying none of these actions is not a tool call.
+        let img_gen = step_update.generate_image.as_ref()?;
         (
             "GENERATE_IMAGE",
             serde_json::json!({
@@ -99,8 +101,6 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
                 "image_name": img_gen.image_name,
             }),
         )
-    } else {
-        return None;
     };
 
     crate::wire_path::normalize_path_args(&mut args);
