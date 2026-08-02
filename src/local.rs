@@ -907,16 +907,22 @@ impl LocalConnectionStrategy {
         let (step_tx, step_rx) = mpsc::unbounded_channel::<crate::step_extract::StepEvent>();
         let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
-        // NOTE: upstream starts idle here, and the loop restructure in
-        // receive_steps() removed the first-poll hazard that previously blocked
-        // this. It still cannot flip, for a second reason: a caller that polls
-        // receive_steps() on a fresh connection — before the reader has seen the
-        // harness's STATE_RUNNING — would race, see idle with an empty queue,
-        // and get an empty stream. Upstream's API is send()-then-receive, which
-        // hides this; ours does not promise that yet. Flipping it needs the
-        // connect-time race closed first (see C2 in docs/remaining-work.md).
-        let is_idle = Arc::new(AtomicBool::new(false));
-        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(false);
+        // Upstream starts idle (local_connection.py:448-459) and this now
+        // matches. Two earlier attempts were reverted: the first hit a
+        // first-poll hazard the receive_steps() loop restructure removed, the
+        // second a connect-time race where a caller polling receive_steps()
+        // before the harness reported STATE_RUNNING saw idle with an empty
+        // queue and got an empty stream.
+        //
+        // What closes it is the contract, not a flag: `send()` clears idle
+        // before the prompt goes out, so send()-then-receive — which is what
+        // `chat()` and `Conversation` do — can never observe the gap. A caller
+        // that subscribes before sending anything now gets an empty stream
+        // immediately instead of blocking forever on a turn that was never
+        // started, which is the better of the two failure modes and the one
+        // upstream has (C2).
+        let is_idle = Arc::new(AtomicBool::new(true));
+        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
         let conn_idle_tx = idle_tx.clone();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));

@@ -377,16 +377,22 @@ impl WasmConnectionStrategy {
         let (step_tx, step_rx) = mpsc::unbounded_channel::<crate::step_extract::StepEvent>();
         let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
-        // NOTE: upstream starts idle here, and the loop restructure in
-        // receive_steps() removed the first-poll hazard that previously blocked
-        // this. It still cannot flip, for a second reason: a caller that polls
-        // receive_steps() on a fresh connection — before the reader has seen the
-        // harness's STATE_RUNNING — would race, see idle with an empty queue,
-        // and get an empty stream. Upstream's API is send()-then-receive, which
-        // hides this; ours does not promise that yet. Flipping it needs the
-        // connect-time race closed first (see C2 in docs/remaining-work.md).
-        let is_idle = Arc::new(AtomicBool::new(false));
-        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(false);
+        // Upstream starts idle (local_connection.py:448-459) and this now
+        // matches. Two earlier attempts were reverted: the first hit a
+        // first-poll hazard the receive_steps() loop restructure removed, the
+        // second a connect-time race where a caller polling receive_steps()
+        // before the harness reported STATE_RUNNING saw idle with an empty
+        // queue and got an empty stream.
+        //
+        // What closes it is the contract, not a flag: `send()` clears idle
+        // before the prompt goes out, so send()-then-receive — which is what
+        // `chat()` and `Conversation` do — can never observe the gap. A caller
+        // that subscribes before sending anything now gets an empty stream
+        // immediately instead of blocking forever on a turn that was never
+        // started, which is the better of the two failure modes and the one
+        // upstream has (C2).
+        let is_idle = Arc::new(AtomicBool::new(true));
+        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
         let conn_idle_tx = idle_tx.clone();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
@@ -1703,7 +1709,14 @@ mod tests {
             let text = msg.to_text().unwrap();
             assert!(text.contains("InitializeConversationEvent") || text.contains("cascadeId"));
 
-            // 2. Send trajectoryStateUpdate (RUNNING)
+            // 2. Wait for the client's prompt. The connection starts idle
+            // (C2), so the turn only begins once something is sent — the same
+            // send()-then-receive order every real caller uses.
+            let msg2 = ws_stream.next().await.unwrap().unwrap();
+            let text2 = msg2.to_text().unwrap();
+            assert!(text2.contains("hello"));
+
+            // 3. Send trajectoryStateUpdate (RUNNING)
             let traj_running = serde_json::json!({
                 "trajectoryStateUpdate": {
                     "trajectoryId": "test_traj",
@@ -1715,7 +1728,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // 3. Send StepUpdate
+            // 4. Send StepUpdate
             let step_update = serde_json::json!({
                 "stepUpdate": {
                     "stepIndex": 1,
@@ -1733,7 +1746,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // 4. Send trajectoryStateUpdate (IDLE)
+            // 5. Send trajectoryStateUpdate (IDLE)
             let traj_idle = serde_json::json!({
                 "trajectoryStateUpdate": {
                     "trajectoryId": "test_traj",
@@ -1746,11 +1759,6 @@ mod tests {
                 .send(WsMessage::Text(traj_idle.to_string()))
                 .await
                 .unwrap();
-
-            // 5. Wait for the client to send "hello"
-            let msg2 = ws_stream.next().await.unwrap().unwrap();
-            let text2 = msg2.to_text().unwrap();
-            assert!(text2.contains("hello"));
 
             // Keep connection open long enough
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1780,6 +1788,11 @@ mod tests {
         let conn = strategy.connect().await.unwrap();
         assert_eq!(conn.conversation_id(), "test_traj");
 
+        // Send first: the connection starts idle, so subscribing before a
+        // prompt yields an empty stream rather than blocking on a turn that was
+        // never started.
+        conn.send("hello").await.unwrap();
+
         // Consume the step stream
         let mut steps = conn.receive_steps();
         let step = steps.next().await.unwrap().unwrap();
@@ -1789,9 +1802,6 @@ mod tests {
         // Stream should end (returns None) once transitioned to IDLE
         let next_step = steps.next().await;
         assert!(next_step.is_none());
-
-        // Send a message
-        conn.send("hello").await.unwrap();
 
         // Join the server task
         server_handle.await.unwrap();
