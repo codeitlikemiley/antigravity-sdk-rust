@@ -191,3 +191,48 @@ pub fn step_from_update(step_update: &StepUpdate) -> Option<crate::types::Step> 
         ..Default::default()
     })
 }
+
+/// Releases a connection's single-consumer claim on the step stream when the
+/// stream is dropped.
+///
+/// `receive_steps()` is called once per turn, so the claim cannot simply be
+/// permanent — it has to be handed back when the caller stops reading.
+#[derive(Debug)]
+pub struct ConsumerGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ConsumerGuard {
+    /// Claims the stream, or returns `None` if another consumer holds it.
+    pub fn claim(flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> Option<Self> {
+        if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self(flag.clone()))
+        }
+    }
+}
+
+impl Drop for ConsumerGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod consumer_guard_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::ConsumerGuard;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn a_second_claim_is_refused_while_the_first_is_alive() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let first = ConsumerGuard::claim(&flag);
+        assert!(first.is_some());
+        assert!(ConsumerGuard::claim(&flag).is_none());
+        drop(first);
+        // Released on drop — this is what lets `receive_steps()` be called once
+        // per turn rather than once per connection.
+        assert!(ConsumerGuard::claim(&flag).is_some());
+    }
+}

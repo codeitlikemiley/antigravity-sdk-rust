@@ -219,6 +219,9 @@ pub enum BuiltinTools {
     /// Tool to generate images from descriptions.
     #[serde(rename = "GENERATE_IMAGE")]
     GenerateImage,
+    /// Tool to put a multiple-choice question to the user.
+    #[serde(rename = "ASK_QUESTION")]
+    AskQuestion,
     /// Terminating signal indicating the task is completed.
     #[serde(rename = "FINISH")]
     Finish,
@@ -237,6 +240,7 @@ impl BuiltinTools {
             Self::ViewFile => "VIEW_FILE",
             Self::StartSubagent => "START_SUBAGENT",
             Self::GenerateImage => "GENERATE_IMAGE",
+            Self::AskQuestion => "ASK_QUESTION",
             Self::Finish => "FINISH",
         }
     }
@@ -273,6 +277,7 @@ impl BuiltinTools {
             Self::ViewFile,
             Self::StartSubagent,
             Self::GenerateImage,
+            Self::AskQuestion,
             Self::Finish,
         ]
     }

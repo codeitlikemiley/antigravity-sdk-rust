@@ -108,8 +108,8 @@ blocked on the migration.
 | wait-for-idle | `Connection` has no `wait_for_idle`; A5 ships an unsound poll loop without it | S |
 | ~~harness-crash-diagnostics~~ | **Done** — landed with A4 | S |
 | predicate-args-fidelity | **`diff_block` done.** Remaining: `SEARCH_DIR`/`RUN_COMMAND` args still carry non-proto result keys (`output`, `combined_output`, `exit_code`) that a predicate cannot rely on before execution | XS |
-| single-consumer-receive-steps | Concurrent `receive_steps()` calls silently split the stream | XS |
-| ask-question-builtin | `BuiltinTools` missing `ASK_QUESTION`; `user_questions.enabled` hardcoded | XS |
+| ~~single-consumer-receive-steps~~ | **Done** — the connection hands out one live stream at a time and a second subscriber gets an error rather than half the steps. The claim is released when the stream drops, so the per-turn call still works | XS |
+| ~~ask-question-builtin~~ | **Done** — `BuiltinTools::AskQuestion` (`ASK_QUESTION`), in `all_tools()`, and `user_questions.enabled` now follows it. Behaviour change: a caller passing `enabled_tools` explicitly must include it to keep the question panel, where before it was on unconditionally | XS |
 
 ---
 
@@ -168,7 +168,7 @@ That is the milestone worth cutting a release around.
 | B3 | Turn hooks | H1a (`pre_turn` with deny semantics), H12 | S |
 | B4 | Conversation drain | A5 + `wait-for-idle` (the latter is a prerequisite, not optional) | M |
 | B5 | Structured tool results | N3 | M |
-| B6 | Small correctness | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
+| ~~B6~~ | Small correctness — **done** | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
 | B7 | WP-2 tail (**CI subset done**; `session_end` reply + `callHookRequest` branch remain) | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
 
 **The CI half of B7 landed early**, after A1 shipped to `src/local.rs` only and

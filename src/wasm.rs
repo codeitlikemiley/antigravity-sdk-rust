@@ -262,7 +262,10 @@ impl WasmConnectionStrategy {
                 enabled: Some(active_tools.contains(&BuiltinTools::StartSubagent)),
             }),
             user_questions: Some(UserQuestionsConfig {
-                enabled: Some(true),
+                // Was hardcoded true, so a caller who listed `enabled_tools`
+                // explicitly still got the question panel and no way to turn it
+                // off. It is a tool like any other.
+                enabled: Some(active_tools.contains(&BuiltinTools::AskQuestion)),
             }),
             file_edit: Some(FileEditToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::EditFile)),
@@ -1026,6 +1029,7 @@ impl WasmConnectionStrategy {
             step_trackers,
             main_trajectory_id: conn_cascade_id,
             cancel_requested,
+            steps_consumed: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -1050,6 +1054,8 @@ pub struct WasmConnection {
     /// or by the idle transition that consumes it. See the field of the same
     /// name on `LocalConnection` for why it is needed.
     cancel_requested: Arc<AtomicBool>,
+    /// Whether a `receive_steps()` stream is currently live. See that method.
+    steps_consumed: Arc<AtomicBool>,
 }
 
 impl Connection for WasmConnection {
@@ -1066,9 +1072,23 @@ impl Connection for WasmConnection {
     }
 
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
+        // One consumer at a time. Two live streams share a single receiver, so
+        // each would take roughly half the steps and neither caller would see a
+        // complete turn — silently. Refusing is the only honest answer; the
+        // claim is released when the first stream is dropped, which is what
+        // makes the per-turn `receive_steps()` call still work.
+        let Some(claim) = crate::step_extract::ConsumerGuard::claim(&self.steps_consumed) else {
+            return stream::once(async {
+                Err(anyhow!(
+                    "receive_steps() is single-consumer and a stream is already active; \
+                     drop it before subscribing again"
+                ))
+            })
+            .boxed();
+        };
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold((), move |()| {
+        stream::unfold(claim, move |claim| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
@@ -1096,10 +1116,10 @@ impl Connection for WasmConnection {
                         // be queued behind the idle marker.
                         Some(crate::step_extract::StepEvent::Idle) => {}
                         Some(crate::step_extract::StepEvent::Step(step)) => {
-                            return Some((Ok(*step), ()));
+                            return Some((Ok(*step), claim));
                         }
                         Some(crate::step_extract::StepEvent::Error(e)) => {
-                            return Some((Err(e), ()));
+                            return Some((Err(e), claim));
                         }
                     }
                 }

@@ -30,6 +30,7 @@ The accepted spellings are exactly `BuiltinTools::as_str()`:
 | `ViewFile` | `VIEW_FILE` |
 | `StartSubagent` | `START_SUBAGENT` |
 | `GenerateImage` | `GENERATE_IMAGE` |
+| `AskQuestion` | `ASK_QUESTION` |
 | `Finish` | `FINISH` |
 
 Prefer `BuiltinTools::RunCommand.as_str()` over a string literal so a rename is
