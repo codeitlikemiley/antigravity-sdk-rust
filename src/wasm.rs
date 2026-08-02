@@ -1852,8 +1852,21 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Keep connection open long enough
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Stay up until the client goes away, rather than sleeping a fixed
+            // 50ms and hoping. The client's teardown now includes a session-end
+            // handshake, and a fixed sleep made this test flaky under load —
+            // it failed once in a full run and passed in isolation.
+            while let Some(msg) = ws_stream.next().await {
+                let Ok(WsMessage::Text(text)) = msg else {
+                    break;
+                };
+                if text.contains("sessionEndRequest") {
+                    let ack = serde_json::json!({ "sessionEndResponse": true });
+                    let _ = ws_stream.send(WsMessage::Text(ack.to_string())).await;
+                    // The session is over by definition; nothing follows it.
+                    break;
+                }
+            }
         });
 
         // Configure host/port via static atomic variable (safe, no unsafe_code)
@@ -1896,6 +1909,10 @@ mod tests {
         assert!(next_step.is_none());
 
         // Join the server task
-        server_handle.await.unwrap();
+        // Close the connection so the server task's read loop ends, then join
+        // it. Dropping the connection is what a real caller's teardown does.
+        conn.disconnect().await.unwrap();
+        drop(conn);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
     }
 }
