@@ -9,6 +9,13 @@ wire format.
 Harness pin: **0.1.1** (`scripts/install_harness.sh:7`, `VERSION="0.1.1"`).
 Crate version at time of writing: **0.1.14** (`Cargo.toml:3`).
 
+> **Read §8 before assigning any work item.** A conflict pass over the finished
+> plan found that seven items edit `Agent::start`, six edit `process_tool_calls`,
+> and two — WI-6 and the policy cluster's `new-workspace-tool-scope` — are
+> mutually exclusive edits to the same five lines that this plan currently ships
+> together. §8 also adds two decisions to take up front, and §9 adds ten
+> uncovered defects.
+
 ---
 
 ## 1. What this covers and what it does not
@@ -200,9 +207,9 @@ that first needs each:
 | `src/workspace.rs` | `pub` | WI-1 | `default_workspaces`, `resolve` |
 | `src/wire_path.rs` | `pub` | WI-2 | `WIRE_PATH_ARGUMENT_KEYS`, `normalize_wire_path`, `normalize_path_args`, `canonical_path_from_args` |
 | `src/path_safety.rs` | `pub` | WI-3 | `secure_normalize_path`, `is_path_in_workspace`, `is_case_insensitive`; WI-4 adds `home_dir`, `expand_home`, `default_app_data_dir` |
-| `src/hook_dispatch.rs` | private `mod` | WI-18 | `RecvState`, `denied_turn_step`, `is_turn_terminal_step` |
-| `src/tool_output.rs` | `pub` | WI-22 | `ToolOutput` + seven result structs, `extract_tool_output` |
-| `src/tool_wire.rs` | `pub(crate) mod` | WI-25 | `parse_tool_arguments`, `tool_result_to_response_json`, `build_tool_response`, `tool_execution_error`, `finish_tool_result`, `dispatch_builtin_tool_error` |
+| `src/hook_dispatch.rs` | private `mod` | WI-17 | `RecvState`, `denied_turn_step`, `is_turn_terminal_step` |
+| `src/tool_output.rs` | `pub` | WI-20 | `ToolOutput` + seven result structs, `extract_tool_output` |
+| `src/tool_wire.rs` | `pub(crate) mod` | WI-24 | `parse_tool_arguments`, `tool_result_to_response_json`, `build_tool_response`, `tool_execution_error`, `finish_tool_result`, `dispatch_builtin_tool_error` |
 | `src/coerce.rs` | private `mod` | WI-34 | `coerce_args`, `coerce_value`, `coerce_to_type` |
 
 **Placement rule, stated once because it is easy to get wrong.**
@@ -5925,3 +5932,465 @@ unconditionally.
 `local_connection_test.py:2815-2860` and `:4034-4076`, which defend the H7-narrow
 decline; and WI-27's `test_finish_tool_result_dispatches_post_tool_call_on_failure`
 is where the H8 contract flips deliberately.
+
+---
+
+## 4. Recommended sequencing
+
+### 4.1 What ships first, and why
+
+**Ship the path-safety chain first (WI-1 … WI-7), in that exact order.** It is
+both the most severe cluster and the most self-contained: seven commits, two of
+which are new files with no callers, and the only shared file is `src/agent.rs`'s
+policy block. It is also the one chain where **order is a correctness
+requirement, not a preference**:
+
+```
+WI-1 (A3)  ── creates the single workspace resolution point
+   └─ WI-2 (S5)  ── normalizes wire paths there and in both extractors
+        └─ WI-3 (S1+S16) ── resolves `..`/symlinks; relies on normalize running first
+             └─ WI-4 (C20) ── app_data_dir; needs both path_safety and normalize
+                  └─ WI-7 (S4) ── unconditional workspace policies
+WI-5 (S12+N6) ── BuiltinTools helper set   ─┐
+WI-6 (S7)     ── workspace_only scope       ─┴─ needed by WI-7's final shape
+```
+
+Landing **WI-7 before WI-2 and WI-3 turns a security fix into a bug report**: every
+`file://` path and every relative path would be denied for every `allow_all()`
+agent, which is most of them. This is exactly why the reviewed S4 spec carried two
+"MANDATORY CO-CHANGE" lite versions; sequencing removes the need for both, and
+**neither lite version should be written.**
+
+**Then WI-8 (S3+S14)**, which is two lines and turns on the fail-closed startup
+guards. It must follow WI-5, because `read_only()` gaining `FINISH` loosens
+`has_write_tools` at the same time S14 tightens `has_mcp_servers` — running both in
+one CI pass makes the two deltas visible together.
+
+Everything after that in 0.1.15 is genuinely independent (§4.3).
+
+### 4.2 What must be batched, and where the release boundaries are
+
+**0.1.15 — no compile breaks.** WI-1 … WI-20. Every item is either additive or a
+behaviour change that existing code still compiles against. This is deliberately
+the larger release: all seven security-relevant items (§1.3) except S2 and T3's
+companion signature work land here, so a user can take the hardening without a
+port.
+
+The two exceptions worth flagging in the release notes as *behavioural*, not
+*source*, breaks: **WI-7** (`allow_all()` no longer disables the workspace
+sandbox) and **WI-14** (`google_search`/`web_search` stop being intercepted).
+
+**0.2.0 — one batched break.** WI-21 … WI-41. Cargo treats `0.1.x` as a
+compatibility range, so *any* of these forces a major-for-0.x bump; batching means
+one migration for downstream instead of six. The audit's own §6 decision 1
+recommends the same shape ("batch WP-10 into a single 0.2.0"), and this plan's
+breaking set is a strict subset of the surface WP-10 will touch — so **do not cut
+0.2.0 for this plan and then cut 0.3.0 for WP-10.** Either hold WI-21 … WI-41 until
+WP-10 is ready and ship one 0.2.0, or accept that WP-10 lands in 0.3.0.
+
+Within 0.2.0 the internal order that matters:
+
+```
+WI-22 (T6)  ──┬─ WI-23 (H11) ──┬─ WI-24 (tool_wire) ─┬─ WI-25 (T5)
+              │                │                     ├─ WI-26 (W8)
+              │                └─────────────────────┴─ WI-27 (H4) ─ WI-28 (docs)
+              └─ (ToolResult fields are what tool_wire's helpers read)
+
+WI-17 (hook_dispatch, already in 0.1.15) ─ WI-29 (H1b) ─ WI-30 (H1d)
+              └─ WI-29 and WI-30 share ONE src/hooks.rs import edit; either land
+                 them in one commit or make WI-29 add `Step` while removing
+                 `ChatResponse`, or an intermediate state fails to compile.
+
+WI-14 (T3, in 0.1.15) ─ WI-32 (T7+T8) ─┬─ WI-33 (T1+T9) ─┐
+                                        └─ WI-34 (T4) ────┴─ WI-35 (T10) ─ WI-36 (X19)
+
+WI-37 (A10) ─┬─ WI-38 (A1)
+             └─ WI-39 (A11)
+
+WI-2, WI-5, WI-9 (all 0.1.15) ─ WI-40 (finish-extractor)
+```
+
+**WI-40 goes last in 0.2.0.** It is the only item in the plan that can leave a turn
+unable to terminate, and it is safe only once `read_only()` covers FINISH (WI-5)
+and the two `deny_all()`-based examples are updated in the same commit.
+
+### 4.3 What can go in parallel
+
+Four independent tracks, no shared files:
+
+| Track | Items | Only shared file |
+|---|---|---|
+| **Path safety** | WI-1 … WI-7 | `src/agent.rs` policy block, `src/policy.rs` |
+| **Policy wiring** | WI-8, WI-9, WI-10 | `src/agent.rs:285-295` (WI-8), `src/policy.rs` (WI-9, WI-10) |
+| **Lifecycle** | WI-11, WI-12 → WI-13, WI-31, WI-37 → WI-38, WI-39 | `src/conversation.rs`, `src/triggers.rs` |
+| **Tools** | WI-14 → WI-32 → WI-33/WI-34 → WI-35 → WI-36 | `src/tools.rs` |
+| **Hooks** | WI-15, WI-16, WI-17 → WI-18 → WI-19, WI-29 → WI-30, WI-21, WI-24 → WI-27 | `src/hooks.rs`, both reader loops |
+
+Cross-track collisions to schedule around, all in the two reader loops:
+
+- **WI-18, WI-19, WI-29, WI-30 all add code at `src/local.rs:877` /
+  `src/wasm.rs:516`.** Land them in the listed order and keep the four blocks
+  visually contiguous; four separate people editing that line will conflict every
+  time.
+- **WI-18 and WI-19 share the connection-struct plumbing** (`src/local.rs:60-63`,
+  `:702`, `:1262` and the wasm mirrors). WI-18 introduces it; WI-19 adds one field.
+- **WI-13, WI-18 and WI-31 all touch `Conversation`.** WI-18 needs the
+  turn-boundary reorder at `src/conversation.rs:146-151`, which WI-13 also moves;
+  land WI-13 first if both are in flight.
+- **WI-21 and WI-27 both rewrite hook dispatch**, but different methods
+  (`dispatch_pre_tool_call` vs `dispatch_on_tool_error`) — genuinely parallel.
+- **WI-15 is superseded in shape by WI-27** but not in behaviour: WI-15's
+  containment semantics survive verbatim into `OnToolErrorOutcome::HookFailed`, and
+  its four tests carry over with only the assertion target changing. Ship WI-15 in
+  0.1.15 anyway — it is a one-`match` fix for a silent security-adjacent failure,
+  and holding it for 0.2.0 buys nothing.
+
+### 4.4 Fast path, if only one thing can be done
+
+If the maintainer wants the minimum shippable security increment:
+**WI-1 → WI-2 → WI-3 → WI-4 → WI-6 → WI-7.** Six commits close the
+workspace-escape hole (S1), the `/tmp` allow-list hole (C20), the
+`allow_all()` exemption (S4), the URI denial-of-service (S5) and the unsent
+workspaces (A3). WI-21 (S2, fail-open pre-tool gating) is the one severe item that
+cannot join them, because it is a compile break.
+
+---
+
+## 5. Public API and behaviour changes, collected
+
+### 5.1 Silently changes what your agent denies — code still compiles
+
+These are the dangerous ones: no compiler error, different runtime behaviour. Each
+needs a CHANGELOG entry.
+
+| Item | What changes | What a user does about it |
+|---|---|---|
+| **WI-7** | `allow_all()` no longer disables the workspace sandbox. File tools are restricted to the configured workspaces, defaulting to **cwd + `~/.gemini/antigravity`**. | `.workspaces(vec!["/one".into(), "/two".into()])` to widen; `.workspaces(vec![])` to opt out entirely (upstream's sanctioned escape). |
+| **WI-7** | A hand-passed `policy::workspace_only(..)` group is now **discarded** and replaced by one derived from `workspaces`. | Configure `workspaces` instead of passing the group. |
+| **WI-3** | Paths containing `..`/`.`, or traversing a symlink out of the workspace, are now DENIED. A symlinked workspace root now resolves. On macOS/Windows comparison becomes case-insensitive (an *allow* change). | Nothing, unless you relied on `../` escapes. |
+| **WI-3 (S16)** | A **relative** `canonical_path` is now resolved against the SDK's cwd and allowed when inside a workspace; previously always denied. Relative escapes stay denied. A relative workspace-list entry is now honoured instead of silently ignored. | Nothing. To keep the old deny, use the `return Err(InvalidInput)` variant given in WI-3. |
+| **WI-2** | `file://` / `cns://` paths in tool args and in the workspace list are rewritten to native paths before hooks, policies and the harness see them. `ToolCall.args` values are rewritten **in place**. | A hook reading `args["file_path"]` now sees a clean path. Against a plain-path harness this is the identity. |
+| **WI-6** | `FIND_FILE` outside every workspace is now **denied** (was allowed). | Add the directory to `workspaces`, or use `workspace_only_for(&BuiltinTools::file_tools(), ws)` for upstream-exact three-tool scoping. |
+| **WI-1** | `HarnessConfig.workspaces` now carries `[cwd]` instead of `[]` when unconfigured. | `.workspaces(vec![])` restores the old payload. |
+| **WI-5** | `.read_only()` agents can now call `FINISH`, so structured output works. `has_write_tools` is false for more configs, so `Agent::start()` succeeds where it previously errored. | Nothing — purely loosening. |
+| **WI-14** | `google_search` / `web_search` return `Unknown tool: '<name>'` instead of scraped results (native) or fabricated empty-success (wasm). Every other unknown tool's error text changes from `"Tool X not found"` to `"Unknown tool: 'X'"`. | Register your own `Tool`. The SDK now makes no network requests other than the harness WebSocket, and spawns no subprocesses. |
+| **WI-11** | A re-issued question or tool-confirmation on the same step is now answered again. Turns that previously hung now complete. | Nothing. |
+| **WI-12** | `is_idle()` is `true` on a fresh connection; `receive_steps()` before the first `send()` now ends immediately instead of blocking. | Always `send()` before subscribing — the documented upstream order. |
+| **WI-13** | A second `send()` during a live turn now **blocks** until that turn finishes, records its steps into `history()`, and can return an error raised by the *previous* turn. | Nothing, unless you relied on back-to-back sends returning instantly (they were silently destroying turn 1). |
+| **WI-15** | A failing `on_tool_error` hook is contained and logged instead of silently disabling every later hook. | Nothing. |
+| **WI-16** | `on_session_end` fires on `Agent::stop()`. `Agent::stop()` can now return `Err` when your hook fails — **after** teardown. | Handle the new `Err` if your hook can fail. |
+| **WI-18** | A registered `pre_turn` hook now runs on every send; a denying hook halts the turn. A hook returning `Err` now propagates out of `Conversation::send`. | Remove any `pre_turn` hook you registered expecting it to be inert. |
+| **WI-19** | `post_tool_call` fires once per completed subagent trajectory, with `name == "START_SUBAGENT"`, `id == None`. | Branch on `result.name` if you dereference `result.id`. |
+| **WI-20** | `post_tool_call` receives structured JSON for six built-ins instead of one display string (falls back to the string when the harness sent nothing structured). | Handle `Value::Object` as well as `Value::String`. |
+| **WI-8** | MCP-targeted policies stop being inert; `mcp_<server>_<tool>` calls are now matched. | Intended — that is what those policies were for. |
+| **WI-26** | A `ToolResult` carrying **both** `result` and `error` is now encoded as the error. | Nothing today; becomes reachable after WI-27. |
+| **WI-27** | `post_tool_call` now fires for **failed** tools too. A hook doing `result.result.unwrap()` will newly panic. | Guard on `result.error`. |
+| **WI-34** | String-encoded arguments arrive already converted to the type the tool's schema declares. | Nothing, unless a tool *depended* on the string form — coercion never touches keys the schema does not declare. |
+| **WI-35** | A multi-call batch runs concurrently, so side effects interleave. Order of results is unchanged. | Nothing on the wire path, which passes batches of one. |
+| **WI-40** | `FINISH` is now policy-evaluated instead of auto-approved. **A `deny_all()`-based policy set will deny it and the turn may never terminate.** | Add `policy::allow("FINISH")`, or use `AgentBuilder::read_only()`. |
+
+### 5.2 Will not compile
+
+| Item | Before | After | Mechanical fix |
+|---|---|---|---|
+| **WI-8** | — | `Agent::start()` returns `Err` for an ASK_USER policy with no handler, MCP policies with no servers, or MCP servers with `policies(vec![])`. | Supply the handler / register the servers / supply a policy. |
+| **WI-4** | — | `Agent::start()` returns `Err` when `HOME`/`USERPROFILE` is unset, or `app_data_dir` is relative. | Set `app_data_dir` to an absolute path. |
+| **WI-5** | — | `LocalConnectionStrategy::connect()` / `WasmConnectionStrategy::connect()` return `Err` when both `enabled_tools` and `disabled_tools` are set. | Set only one. |
+| **WI-21** | `dispatch_pre_tool_call(..) -> Result<HookResult, _>` | `-> HookResult` | Drop the `?` / `.unwrap()`. |
+| **WI-22** | `ToolCall`/`ToolResult` struct literals | `#[non_exhaustive]` + two new fields each | `ToolCall::new`, `ToolResult::success`, `ToolResult::failure`. `ToolCall` deserialized without `args` now yields `{}` instead of failing. |
+| **WI-27** | `on_tool_error(&anyhow::Error) -> Result<(HookResult, Option<Value>), _>` | `on_tool_error(&ToolExecutionError) -> Result<Option<String>, _>` | `Ok((HookResult{allow:true,..}, Some(json!(v))))` → `Ok(Some(v.to_string()))`; `Ok((HookResult{allow:false,..}, None))` → `Ok(None)`. **The hook can no longer make a failed tool look successful** — move the fallback into the tool body (upstream `hooks.py:185-189`). |
+| **WI-27** | `dispatch_on_tool_error(..) -> Result<(HookResult, Option<Value>), _>` | `-> OnToolErrorOutcome` (infallible) | Match the three variants. |
+| **WI-29** | `post_turn(&self, response: &ChatResponse)` | `post_turn(&self, response_text: &str)` | `r.text` → `response_text`; read tokens from `Conversation::last_turn_usage()` and steps from `history()`. |
+| **WI-30** | `on_compaction(&self, summary: &str)` | `on_compaction(&self, step: &Step)` | `summary` → `step.content`. |
+| **WI-31** | `ChatResponse.usage_metadata: UsageMetadata` | `Option<UsageMetadata>` **and per-turn, not cumulative** | For the old value use `conversation.total_usage().await`; for the new shape, `.unwrap_or_default()`. |
+| **WI-32** | `ToolRunner::register(..) -> ()`; `pub tools: Arc<RwLock<HashMap<..>>>` | `-> Result<(), anyhow::Error>`; field is private | `.await` → `.await?`; `runner.tools` → `runner.descriptors().await` / `runner.tool_names().await`. Duplicate names now error at `Agent::start()`. |
+| **WI-33** | `ToolContext::conversation_id(&self) -> &str`; `is_idle()`; `send()` | `-> String`; the latter two **removed** | Nothing can currently obtain a `ToolContext`, so the blast radius is zero — which is exactly why this is free now and expensive later. |
+| **WI-37** | `Trigger::run(&self, connection: AnyConnection)` | `run(&self, ctx: TriggerContext)` | `connection.send_trigger_notification(m)` → `ctx.send(m)`. Triggers calling `disconnect`/`send_halt_request`/`send_tool_response` **have no replacement, by design.** |
+| **WI-38** | `TriggerRunner::start(&self, &AnyConnection)` | `async fn start(&self, AnyConnection) -> Result<()>` | `runner.start(&conn)` → `runner.start(conn).await?`. A second `start()` errors. |
+| **WI-39** | `every(interval, message)` | `every(interval, callback) -> Result<PeriodicTrigger, _>` | `every(d, "msg")` → `every_message(d, "msg")?`, or `every(d, \|ctx\| async move { ctx.send("msg").await })?`. A zero interval now errors. |
+| **WI-10** | `enforce(Vec<Policy>, ..)`; `AgentBuilder::{policy, policies}` | `impl IntoPolicies` | Source-compatible for all in-tree callers; technically breaking for function-pointer coercion. `.policy()` now **appends** and accepts a group. |
+
+### 5.3 New public API (additive)
+
+`workspace::{default_workspaces, resolve}` ·
+`wire_path::{WIRE_PATH_ARGUMENT_KEYS, normalize_wire_path, normalize_path_args, canonical_path_from_args}` ·
+`path_safety::{secure_normalize_path, is_path_in_workspace, is_case_insensitive, home_dir, expand_home, default_app_data_dir}` ·
+`BuiltinTools::{all_tools, file_tools, path_scoped_tools}` ·
+`CapabilitiesConfig::{validate, active_tools}` ·
+`policy::{workspace_only_for, safe_defaults, allow_mcp_with, deny_mcp_with, ask_user_mcp_with, McpPolicyOptions, IntoPolicies}` ·
+`tool_output::{ToolOutput, RunCommandResult, ListDirectoryEntry, ListDirectoryResult, SearchDirectoryResult, FindFileResult, EditFileResult, GenerateImageResult, TextResult, extract_tool_output}` ·
+`error::ToolExecutionError` (re-exported as `types::ToolExecutionError`) ·
+`types::{OnToolErrorOutcome, ToolDescriptor}` ·
+`hooks::{gate_pre_tool_call, denial_message}` ·
+`connection::{WeakConnection, AnyConnection::downgrade}` ·
+`triggers::TriggerContext` · `trigger_helpers::every_message` ·
+`ToolRunner::{register_as, unregister, tool_names, descriptors, set_context}`.
+
+APPROVE-policy auto-names change from `allow_*` to `approve_*` (WI-10) — visible
+only in `tracing` and `Debug` output; nothing in-tree matches on the string.
+
+---
+
+## 6. Test strategy
+
+### 6.1 Upstream test files to port wholesale
+
+Prefer porting an upstream test over inventing one. These four files carry the bulk
+of the evidence:
+
+| Upstream file | Ranges to port | Lands in |
+|---|---|---|
+| `0.1.9/hooks/policy_test.py` | `:728-829` (workspace_only suite), `:776-783`, `:808-819`, `:821-829`, `:840-855`, `:857-864`, `:866-886`, `:888-898` | WI-3, WI-6 |
+| `0.1.1/hooks/policy_test.py` | `:113-134`, `:607-645`, `:666-675`, `:728-748`, `:907-999`, `:972-980` | WI-8, WI-9, WI-10, WI-40 |
+| `0.1.1/hooks/hook_runner_test.py` | `:27-54`, `:102-114`, `:184-217`, `:316-329`, `:365-399` | WI-15, WI-16, WI-18, WI-27, WI-29, WI-30 |
+| `0.1.1/tools/tool_runner_test.py` + `0.1.9/tools/tool_runner_test.py` | `:43-103` (register/unregister/duplicate), `:275-335` (coercion), `:364-399` (batch + unknown tool), `:422-438`, `:484-518`, `:548-790` (`ContextInjectionTest`) | WI-14, WI-32, WI-33, WI-34, WI-35 |
+| `0.1.1/triggers/trigger_runner_test.py` | `:27-194` — the whole file | WI-38 |
+| `0.1.1/triggers/helpers_test.py` | `:27-68` (minus `test_every_sets_name`, no Rust analogue) | WI-39 |
+| `0.1.1/conversation/conversation_test.py` | `:866-888`, `:916-951`, `:954-1060` | WI-13, WI-31 |
+| `0.1.9/connections/local/event_processor_test.py` | `:33-53` | WI-2 |
+| `0.1.9/connections/local/hook_router_test.py` | `:540-563`, `:572-613`, `:605-609`, `:645-653`, `:659-726`, `:900-951` | WI-2, WI-27 |
+| `0.1.9/types_test.py` | `:722-739` | WI-23 |
+
+### 6.2 New Rust tests with no upstream analogue
+
+Nine, each pinning something Python cannot express or gets free from its runtime:
+
+1. `path_safety::normalizes_nonexistent_leaf_and_intermediate` — Python gets this
+   from `resolve(strict=False)`. **The `create_file` regression guard.**
+2. `path_safety::dotdot_escape_is_outside` / `symlink_escape_is_outside` /
+   `root_parent_clamps` — the S1 regression tests.
+3. `path_safety::default_app_data_dir_errors_without_home` — asserts the message
+   does **not** contain `/tmp`. The C20 security regression test.
+4. `wire_path::normalize_wire_path_is_idempotent` — licenses the belt-and-braces
+   call inside `secure_normalize_path`.
+5. `types::file_tools_matches_upstream` — guards against someone "fixing"
+   `file_tools()` toward the audit's wrong claim.
+6. `tools::descriptors` **ordering under a 50-iteration loop** — the `HashMap`
+   randomisation is invisible in a single-run test.
+7. `tools`/`connection` **`Weak::upgrade().is_none()` leak regression** — fails if
+   `WeakConnection` is ever changed back to a strong handle. Python cannot have
+   this bug.
+8. `tools` **deadlock regression** — a tool that calls `register` from inside
+   `call` must complete, under `tokio::time::timeout`.
+9. `integration_tests::test_context_aware_tool_receives_learned_conversation_id` —
+   **the test that would actually have caught T1.** A snapshot-based context
+   design passes every unit test and fails this one.
+
+### 6.3 Test-mechanics rules the implementer must follow
+
+- **Every backgrounded hook dispatch needs a rendezvous.** WI-18, WI-19, WI-29 and
+  WI-30 all dispatch via `tokio::spawn` / `crate::spawn_task`, whereas upstream
+  awaits inline. "Run one chat then assert" is a race. Use a
+  `tokio::sync::Notify` or an `mpsc` the hook writes to, awaited under
+  `tokio::time::timeout(Duration::from_secs(1), ..)` — the Rust form of upstream's
+  `asyncio.Event` + `wait_for` at `local_connection_test.py:2320`/`:2349`. Negative
+  tests need a **bounded wait that expects a timeout**, not an immediate
+  `assert!(captured.is_empty())`.
+- **`std::env::set_var` is unreachable.** It is `unsafe` in edition 2024 and
+  `Cargo.toml:42` sets `unsafe_code = "forbid"`. Test env-dependent code by
+  refactoring the env read into a one-line wrapper over a pure
+  `fn f(home: Option<PathBuf>)` the tests drive directly (WI-4).
+- **cwd mutation is process-global.** Guard `set_current_dir` with a shared
+  `static CWD_LOCK: Mutex<()>`; do not scatter calls (WI-3).
+- **Every test that can hang must be wrapped in `tokio::time::timeout`** — WI-13,
+  WI-35, WI-38, WI-40 and WI-36's mock-harness read all have hang modes.
+- **Both transports or it did not land.** `src/wasm.rs` is a hand-copied fork and
+  its unit tests assert on plain strings, so they will not catch a missed wasm
+  edit. WI-2, WI-11, WI-12, WI-16, WI-18, WI-19, WI-20, WI-21, WI-25, WI-26, WI-27,
+  WI-29, WI-30 and WI-40 all have a wasm mirror. Gate on
+  `cargo check --target wasm32-unknown-unknown`.
+- **`src/wasm.rs:1536-1591` is not coverage.** Finding X12: it is a closed
+  Rust→Rust loop encoding 0.1.1 semantics on both ends, so it passes regardless of
+  whether the SDK is right. Do not extend it as a substitute for a real fixture;
+  WI-12 restructures it for a different reason (protocol ordering).
+- **Doctests do not run.** `.github/workflows/ci.yml:38` is
+  `cargo test --all-targets`, which excludes them, and `src/lib.rs:1-39` has no
+  `#![doc = include_str!]`. Every `docs/**` and `skills/**` snippet in this plan is
+  unverified by CI — which is how `docs/hooks.md:516-559` came to teach a behaviour
+  the SDK is about to remove. WI-28 optionally closes this (X3).
+
+### 6.4 What cannot be tested until the mock harness is rebuilt — flagged, not planned
+
+`src/bin/mock_localharness.rs:99-150` emits only `stepUpdate` and
+`trajectoryStateUpdate` frames. It has **no `toolCall`, no `toolConfirmationRequest`
+and no `questionsRequest`** arm, and it does not send an
+`initializeConversationResponse`. Rebuilding it is **WP-2 in
+`docs/upstream-parity.md` — migration work, out of scope here.**
+
+Blocked until then:
+
+| Test | Blocked on | Item |
+|---|---|---|
+| `tests/policy_gating.rs` — pre-tool denial end to end (ports 0.1.1 `local_connection_test.py:4185-4216`, `:4219-4249`, `:319-350`) | `toolCall` + `toolConfirmationRequest` frames | WI-21 |
+| `test_start_populates_mcp_server_names` end to end | `toolCall` frame | WI-8 |
+| Re-issued question/confirmation end to end (WAITING→ACTIVE→WAITING) | `questionsRequest` frame | WI-11 |
+| `harnessConfig.tools[*].name` ordering assertion | init-frame capture | WI-32 |
+
+**Do not block the corresponding fixes on this.** Each has a helper-level or
+`policy::enforce`-level substitute named in its work item, and WI-36 adds the one
+mock branch (`toolCall` + `toolResponse` echo) that is small enough to carry
+without a rebuild — noting that **that branch is 0.1.1-format JSON and must be
+updated with WP-2** (`STATE_IDLE` → `STATE_FULLY_IDLE`, mandatory
+`initializeConversationResponse` first frame).
+
+---
+
+## 7. Interaction with the 0.1.9 migration
+
+Per item: does WP-1 … WP-11 **change** it, **subsume** it, or **leave it alone**?
+
+### 7.1 Left alone entirely
+
+Transport- and wire-independent; nothing in the migration touches them.
+
+| Item | Why |
+|---|---|
+| **WI-1 (A3)** | `HarnessConfig.workspaces` survives into 0.1.9 (`local_connection_config.py:322`). `workspace::resolve()` becomes the single insertion point WP-4 reuses. |
+| **WI-3 (S1+S16)** | `secure_normalize_path`/`is_path_in_workspace` read `canonical_path` and nothing else. After WP-8, `HookRouter::_handle_pre_tool` sets `canonical_path` from the normalized args (`hook_router.py:193-200`) and the predicate is unchanged. |
+| **WI-4 (C20)** | W18/WP-4 separates `HarnessConfig.app_data_dir` from `save_dir`; when it lands it **must source the value from `default_app_data_dir()`** rather than re-deriving it, so the wire field and the allow-list cannot disagree. Record that on the W18 ticket. |
+| **WI-6 (S7)** | `file_tools()` is identical in 0.1.9. Because both helpers are defined in terms of `as_str()` rather than literals, S8's lowercase rename propagates automatically. |
+| **WI-7 (S4)** | 0.1.9 only *adds* the idempotence filter, which this plan already includes. |
+| **WI-8 (S3+S14)** | 0.1.9 `agent.py:102-107` and `:89-100` are byte-identical to 0.1.1's. |
+| **WI-9 (S13)**, **WI-10 (S15+N8)** | `safe_defaults` and `_mcp_policies` are unchanged in 0.1.9. |
+| **WI-11 (C5)** | 0.1.9 kept `_StepTracker` verbatim (`event_processor.py:105-129`) with the identical clear-on-leaving-WAITING rule at `:116-123`; it only added `pre_step_dispatched`/`post_step_dispatched` for H17. |
+| **WI-12 (C2)** | 0.1.9 does the same at `event_processor.py:367-368` / `:380`. |
+| **WI-13 (A5)** | `conversation.py:122-131` is identical apart from `is_idle is False`. |
+| **WI-14 (T3)** | The migration makes the *correct* replacement available (W13 `HarnessSideTools.search_web = 12`, A13 `BuiltinTools::SEARCH_WEB`, W5's `search_web = 34` arm), at which point WI-14's doc note is rewritten to point at it. |
+| **WI-16 (H1c)** | WP-8 adds an *optional* harness round-trip (`session_end_request` on OutputEvent arm 15), but `docs/upstream-parity.md:786` says to keep dispatching unconditionally from `disconnect()` so the client-side hook fires on **both** transports — the WASM path has no harness subprocess to round-trip with. C1 later replaces `proc.kill()` with the ordered shutdown; the dispatch stays at the top, where upstream puts it (`:684-690`, before the `try:` at `:692`). |
+| **WI-23 (H11)** | Unchanged as a type. WP-8 adds a *second* construction site: `HookRouter::handle_on_tool_error` builds it from `OnToolErrorArgs{tool_name=1, error_message=2, server_name=4}` with `source = None`. |
+| **WI-25 (T5)** | 0.1.9's line is character-for-character the same expression as 0.1.1's, and `ToolCall.arguments_json` is field 3 in both protos. |
+| **WI-31 (A2)** | 0.1.9 `types.py:1025-1028` / `conversation.py:133` are identical. **Do not apply A18** (making `last_turn_usage` private) before this lands. |
+| **WI-32 (T7+T8)** | `HarnessConfig.tools` (`Tool` message, `proto/localharness.proto:97`) survives unchanged apart from the additive `defer_loading = 5` (W27), which neither SDK sets. |
+| **WI-34 (T4)**, **WI-35 (T10)** | Purely internal to `ToolRunner`. If the harness ever delivers true multi-call batches, WI-35 is the code path that must already be correct. |
+| **WI-37 (A10)** | `TriggerContext` is unchanged through 0.1.9; 0.1.5 only re-typed its ctor to a `TriggerConnection` Protocol, which the `AnyConnection` field already models structurally. |
+| **WI-38 (A1)** | `TriggerRunner` is unchanged 0.1.1 → 0.1.9. When C1 lands, `Agent::stop` keeps this exact ordering — a trigger must not be able to write into a socket C1 is closing. |
+| **WI-39 (A11)** | `helpers.py:39-72` is unchanged through 0.1.9. A12 (`on_file_change`) later takes the same `(ctx, changes)` callback shape this item establishes. |
+
+### 7.2 Extended by the migration, not undone
+
+| Item | What the migration adds |
+|---|---|
+| **WI-2 (S5)** | **This module is the migration target, not a casualty.** When WP-8 lands the `HookRouter`, `PreToolArgs.arguments_json` is parsed to a `Value` and handed straight to `normalize_path_args` + `canonical_path_from_args` — exactly `hook_router.py:191-200`. When W5 adds the `mcp_tool`/`custom_tool` StepUpdate arms, their args are arbitrary JSON and get the same treatment **for free**, which is why `normalize_path_args` takes `&mut Value` rather than being folded into per-arm proto field access. |
+| **WI-5 (S12+N6)** | `all_tools()` is where 0.1.9's `SEARCH_WEB`/`READ_URL_CONTENT` variants get added (A13), `read_only()` gains `READ_URL_CONTENT` (0.1.9 `types.py:238`), and `active_tools()` is where `HarnessSideTools.search_web = 12` / `read_url_content = 14` are derived (W13). **Having one helper instead of four copies is what makes that a one-line change.** |
+| **WI-17 (hook_dispatch)** | Survives WP-8. When WP-5 rewrites `receive_steps` around a `StepEvent::{Step,Idle,Close}` enum (`docs/upstream-parity.md:327,720`), `RecvState` is either kept as the outer poll state or folded into that rewrite. This module is also the natural landing zone for X1's later `build_harness_config` extraction, so creating it now is a **down payment on WP-4, not throwaway**. |
+| **WI-20 (N3)** | The result **types** survive untouched — that is why the serde aliases are written in now. What changes is the *extraction site*: 0.1.9 parses a JSON string supplied by the harness keyed by tool name (`_TOOL_RESULT_MODELS` at `event_processor.py:132-141`, `_extract_tool_result` at `:144-162`) rather than reading per-action proto fields, and it is consumed by the `HookRouter` (`:374`). So `extract_tool_output(&StepUpdate)` is replaced by `extract_tool_output_json(tool_name, &str)` while the types and `Display` impl carry over verbatim. Add `SearchWebResult`/`ReadUrlContentResult` (0.1.9 `types.py:90-106`) with W13/A13. |
+| **WI-21 (S2)** | **A prerequisite for H2, not a detour.** When the harness-side hook channel lands, `HookRouter::_handle_pre_tool` maps the same `HookResult` onto `PreToolResult{decision: DENY, reason: result.message}` (`hook_router.py:216-222`) — an infallible `HookResult` with a populated `message` is exactly the input that wire path needs. After W8, the custom-tool denial moves from `ToolResponse.response_json` to the new `error_message = 5` field (`event_processor.py:770-773`); `denial_message()` is the string to put there, one line at each of two sites. |
+| **WI-22 (T6)** | `server_name` starts carrying real values once WP-8 populates it from `PreToolArgs.server_name = 3`, `PostToolArgs.server_name = 5`, `OnToolErrorArgs.server_name = 4`. The localharness `ToolCall` message **never** gains the field (verified in both protos), so the client-side custom-tool path keeps `server_name: None` forever — **correct, not an oversight**. `exception` stays local-only, which is exactly why `ToolExecutionError::source` is optional. |
+| **WI-24/WI-26 (tool_wire, W8)** | **WI-26 exists for the migration.** Once WP-1 regenerates the proto with `ToolResponse.error_message = 5`, the failure arm of `build_tool_response` becomes one struct literal in one file, and `test_build_tool_response_failure_sets_response_json_at_current_pin` flips to the 0.1.9 assertion named in its own comment. WP-7's C15 media extraction plugs into the success arm's `supplemental_media` at the same spot. |
+| **WI-27 (H4)** | **The specced trait signature is the destination shape, not a stepping stone:** WP-8's `HookRouter::handle_on_tool_error` needs exactly `Option<String>` to fill `OnToolErrorResult.custom_error_message`, and `OnToolErrorOutcome` maps 1:1 onto the response oneof (`CustomMessage` → `on_tool_error_result`; `Unchanged`/`HookFailed` → `empty_result`). |
+| **WI-29 (H1b)** | The `&str` signature is chosen to be the **last** one: `PostTurnArgs.response_text` delivers exactly that. |
+| **WI-33 (T1+T9)** | The context slot, the injection branch and the `Agent::start` call site are unaffected. Two things change *inside* `ToolContext` at WP-8: upstream re-based it on `Conversation` in 0.1.4, and on a shared reentrant `StateStore` with `update_state`/`lock()` in 0.1.7 (H13). Neither invalidates this design — swapping the field to `std::sync::Weak<Conversation>` is a one-line change that keeps the cycle broken (`Conversation` owns the `AnyConnection`, so a strong handle there is the same cycle by a longer path). |
+| **WI-36 (X19)** | Example and unit tests carry over unchanged. The mock-harness branch is 0.1.1-format JSON and **must be updated with WP-2**; the unknown-tool assertion then moves from inspecting `responseJson` to inspecting `errorMessage` (W8). |
+| **WI-40 (finish-extractor)** | Unchanged for the legacy confirmation path. Once H2 lands, the harness sends `PreToolArgs.tool_name` as the proto field name and `HookRouter` maps it via `PROTO_FIELD_TO_SDK_NAME` (`hook_router.py:184`), so `"finish"` arrives already named — this arm then serves only the legacy path and history replay. S8 renames `"FINISH"` to `"finish"`. |
+
+### 7.3 Deleted by the migration — deliberate, and stated up front
+
+Two items are client-side approximations that WP-8 **removes** rather than
+migrates. Both are worth doing anyway, because without them the behaviour is broken
+against the harness this crate actually pins, and WP-8 is XL and gated on
+WP-1/2/3/5/6.
+
+| Item | What WP-8 does |
+|---|---|
+| **WI-18 (H1a)** | In 0.1.9 PRE_TURN moves onto the harness: `hook_router.py:138-157` answers a `CallHookRequest` with `PreTurnResult{decision, reason}` and the Go harness enforces the denial. WP-8 **deletes** the `dispatch_pre_turn` call inside `send()` and re-homes it in `HookRouter::_handle_pre_turn`; `turn_denied`, `denied_turn_step` and the `RecvState::Fresh` check go away. **What survives verbatim:** `HookRunner::dispatch_pre_turn`, its short-circuit-on-first-deny semantics, and the `HookResult.message → reason` mapping — WP-8's router calls exactly this dispatcher. |
+| **WI-19 (H12)** | 0.1.9 deleted this client-side path entirely: `event_processor.py:539-542` returns early for non-main trajectories, and subagent tool completion is reported by the harness as `LIFECYCLE_HOOK_POST_TOOL` with `PostToolArgs{tool_name, server_name, result, error}` (`hook_router.py:223-252`). WP-8 **deletes** the TrajectoryStateUpdate dispatch and the `subagent_responses` map. Keep the capture and dispatch blocks visually contiguous and commented with the upstream line refs so WP-8 removes them as one unit. |
+
+**If the maintainer declines harness-side hooks** (`docs/upstream-parity.md` §6
+decision 5), both become permanent rather than transitional — which is a further
+argument for building them correctly now.
+
+### 7.4 The one item whose *correctness bound* is migration-dependent
+
+**WI-19 (H12).** `is_subagent` reuses the `learned_cascade` heuristic
+(`src/local.rs:750-760`, `:1036-1037`), which is only populated from a `StepUpdate`
+where `cascade_id == trajectory_id`. If no such step has arrived — a resumed
+session, or a subagent trajectory reporting first — the hook does not fire. **That
+is upstream 0.1.1's exposure too** (`self._cascade_id and tsu.trajectory_id != self._cascade_id`,
+`local_connection.py:890-892`), so it is parity-correct today and improves for free
+when C4 replaces the heuristic with `main_trajectory_id` set from the first
+non-empty `trajectory_id`. **Do not attempt C4 inside WI-19.**
+
+### 7.5 One note to carry onto an existing migration ticket
+
+**WI-3's S16 half** resolves relative paths against the SDK process's cwd. Once A3
+lands and we start declaring `HarnessConfig.workspaces` honestly, the harness may
+begin emitting paths relative to a *declared workspace* rather than to its cwd, in
+which case resolving against cwd would be wrong. **Add that note to the A3
+follow-up ticket**, not to this plan — nothing about it is actionable today, and
+the current behaviour is upstream-identical.
+
+---
+
+## 8. Conflict pass — collisions, and what §4's ordering does not cover
+
+A final agent reviewed the 41 items as a set, looking only for cross-cutting problems. §4 already gets the path-safety chain right, including why no "lite" co-change should be written. This section records what it does not cover.
+
+The plan converges on four functions: `Agent::start` (`src/agent.rs:196-300`) is edited by **seven** items, `process_tool_calls` (`src/tools.rs:141-225`) by **six**, `src/hooks.rs:237-334` by **six**, `workspace_only` (`src/policy.rs:166-207`) by **five**, and `extract_builtin_tool_call` (`src/local.rs:1293-1411`) by **four**.
+
+### 8.1 Resolve this before assigning any work
+
+**WI-6 (S7) and the policy cluster's `new-workspace-tool-scope` are mutually exclusive edits to the same five lines, and this plan ships both.** One reduces `workspace_only` to upstream's exact `file_tools()` — `[VIEW_FILE, CREATE_FILE, EDIT_FILE]`, byte-identical at 0.1.1 and 0.1.9; the other keeps the six tools the crate scopes today.
+
+Taking the parity reading literally would **remove** the `LIST_DIR`/`SEARCH_DIR` denials we currently ship. That is a silent security downgrade: `search_directory` returns matching file *content*, so the model could read anywhere on disk, and nothing compensates, because A3 means the harness currently receives an empty `HarnessConfig.workspaces`.
+
+Recommended resolution — keep both helpers (`file_tools()` for API parity, `path_scoped_tools()` for what the sandbox enforces), have `workspace_only()` use the latter, and record the retention as a **named divergence** in the changelog rather than presenting it as parity.
+
+### 8.2 Sequencing rules
+
+| Rule | Applies to | What it requires |
+|---|---|---|
+| **workspace-scope-contradiction** | WI-6 vs `new-workspace-tool-scope` | S7 and new-workspace-tool-scope are mutually exclusive edits to the same five lines — pick one before either is implemented. this is a product decision, not an implementation ordering. Resolve it before either spec is assigned. Recommended resolution — take S7's substance with new-workspace-tool-scope's honesty: keep both helpers (`file_tools()` = upstream's exact three, `path_scoped_tools()` = the six the sandbox actually enforces), have `workspace_only()` use `path_scoped_tools()`, and record the … |
+| **agent-start-single-owner** | WI-1, WI-5, WI-2, WI-7, WI-8, WI-33 | Seven specs edit src/agent.rs:196-300; three define their own `workspaces` binding and one re-emits the line another deletes. land src/agent.rs:196-300 as ONE commit, in this internal order, with a single `workspaces` binding owned by A3. (1) N6 first — it collapses :196-237 into `self.config.capabilities.validate()?; let active_tools = self.config.capabilities.active_tools()?;`, shrinking the region everything else edits. (2) A3 — introduce `let workspaces = … |
+| **s4-lite-reimplementations** | WI-7 vs WI-2, WI-3, WI-4 | S4 ships weaker inline copies of S5 and S16, and omits S1 from its dependencies while making S1's vulnerable path universal. three parts. (1) DELETE both lite blocks from S4's text. S4's change section must be reduced to exactly: delete src/agent.rs:256-262, dedent the block, and add `final_policies.retain(\|p\| p.name != "workspace_only");` before the prepend. Everything else in S4's change section belongs to A3, C20, S5 and S1/S16 and must be struck so it cannot be applied twice or applied weakly. … |
+| **h4-supersedes-h9** | WI-27, WI-15 | H4 and H9 both rewrite dispatch_on_tool_error with incompatible signatures — H9 is entirely subsumed. if H4 is being taken (see meta-h4-is-a-forward-port for whether it should be), DROP H9 from the plan and move its two upstream test ports — 0.1.1 hook_runner_test.py:231-243 containment and hook_runner_test.py:383-399 fall-through — into H4's test list, which already names both. If H4 is NOT taken (declined as a 0.1.6 forward-port), then H9 becomes the correct minimal fix and … |
+| **extractor-single-owner** | WI-2, WI-40, WI-22, WI-20 | S5 owns extract_builtin_tool_call; new-finish-extractor's and T6's shown code no longer applies after it. S5 is the sole owner of this function's structure and must land first, in one commit covering BOTH src/local.rs:1293-1411 and src/wasm.rs:1164-1276. Then rebase the other three onto S5's shape: (1) new-finish-extractor becomes one more branch of S5's if/else chain producing `("FINISH", json!({"output_string": ...}))`, with no `canonical_path` field at all (the tail derives it, … |
+| **tools-rs-single-rewrite** | WI-35, WI-14, WI-34, WI-33, WI-22, WI-32 | T10 rewrites the whole of process_tool_calls that T3/T4/T1/T6/T7+T8 patch, and its shown code is already stale against T6. make T10 the single commit that rewrites `process_tool_calls`, and demote T3, T4, T1's dispatch branch and T6's six literals to inputs rather than separate edits to the same lines. Concretely: (1) land T7+T8 first (it changes the storage type and is the only one that alters the function's preamble). (2) land T6 second (it changes the `ToolResult` shape every later line … |
+| **w8-reverts-s2-denial-message** | WI-26, WI-21 | W8 instructs the implementer to keep the hardcoded denial string that S2 replaces. land S2 BEFORE W8, and amend W8's item 2 to read: "Construct the `denied` ToolResult from the hook's decision — `error: Some(crate::hooks::denial_message(&decision))` — which S2 has already put in scope at this site. Do not reintroduce the literal." W8's underlying point survives: the value of its change is that after it, the denial path builds a `ToolResult` and hands it to … |
+| **hook-signature-finality-is-unsupported** | WI-29, WI-30, WI-27, audit H5 | H1b claims the &str post_turn signature is the last break; H5 (HookContext) will re-break every hook method. and a decision the maintainer must make before any hook signature ships. Option A (recommended): pull H5's *signature* half forward into this release even if its state-scoping half is deferred — i.e. add the context parameter to `Hook::post_turn`, `on_compaction`, `on_tool_error`, `pre_tool_call`, `post_tool_call` and `pre_turn` in the same commit as H1b/H1d/H4, passing a … |
+| **h4-is-a-forward-port-not-a-today-fix** | WI-27, WI-34, WI-22, WI-20 | H4, T4, T6's non_exhaustive and N3's aspect_ratio are 0.1.6-0.1.9 forward-ports; H4 is accepted on exactly the evidence for which H8 and H7-narrow were declined. apply one decision rule to the whole plan and state it in docs/upstream-parity.md §6. Either (i) 'this release fixes defects against the pinned 0.1.1 harness only', in which case H4 must be reduced to its today-defects — add the `val.is_some()` guard at src/local.rs:1161-1165 and src/wasm.rs:800-804, and stop deriving `StepStatus` from the post-hook `result.error` at … |
+| **hooks-shared-edit-points** | WI-16, WI-18, WI-19, WI-29, WI-30 | Four specs edit the same 4-line import block and three insert into the same dispatch point in both transports. land H1a, H1b, H1c, H1d+H16 and H12 as ONE commit per transport pair, or better as one commit covering both transports. Concretely: (1) new-shared-hook-dispatch-module first, unchanged. (2) One 'hook liveness' commit that (a) rewrites src/hooks.rs:6-9 to its final import set in a single edit, (b) changes all three signatures (post_turn `&str`, on_compaction `&Step`, and — if … |
+| **conversation-send-three-owners** | WI-13, WI-18, WI-31 | A5, H1a and A2/A19 collide in src/conversation.rs; A5 without A19 makes ChatResponse.steps more wrong. treat src/conversation.rs as one owner. (1) A2 first — it is a one-line change at :307 plus a type change at src/types.rs:609 and four doc sites, and it is the only one of the three that is purely mechanical. (2) new-chatresponse-per-turn-steps (A19, specced below) immediately after, in the same PR: it is the same three lines (:306-313) and the same `turn_start_indices` state … |
+| **dispatcher-failure-contracts-diverge** | WI-21, WI-27, WI-15 | After this plan HookRunner's six dispatchers have four different failure contracts, and two keep failing open. plus one addition. Decide and document a single failure contract for `HookRunner`, in a doc comment on the impl block, before S2 lands: recommended rule — 'a hook that returns Err or panics is contained, logged at ERROR, and converted into the most conservative outcome for that hook kind; no dispatcher returns Result'. Then apply it uniformly: S2 (pre_tool_call -> deny), H4/H9 … |
+| **ci-cannot-see-half-the-plan** | the whole plan | Nothing in the plan makes CI compile the wasm target, the cfg-gated branches, or the documentation these specs rewrite. land the CI additions FIRST, before the clusters, as the cheapest possible version of X3. Three jobs, all XS-to-S: (1) `cargo check --target wasm32-unknown-unknown` (and `--target wasm32-wasip1` if the crate claims it) — this is the only thing that compiles the wasm-only cfg arms, and it must be added before T1's `WeakConnection` and A1's `TriggerRunner` land, since both … |
+
+The three that change what a commit *is*, not merely when it lands:
+
+- **`Agent::start` is one commit, not seven.** Internal order: WI-5's N6 half first (it collapses `:196-237` into `capabilities.validate()?` + `active_tools()?`, shrinking the region everything else edits), then WI-1's `workspaces` binding introduced *above* the `has_allow_all` gate, then WI-2, WI-3, WI-7, WI-8. That binding is the **only** `workspaces` binding permitted from then on — three items currently define their own.
+- **`process_tool_calls` is one rewrite.** WI-32 (storage type) → WI-22 (`ToolResult` shape) → WI-14 (pure deletions) → then WI-35 + WI-34 + WI-33 as a **single** commit, because `join_all`'s body is the only place the coercion call and the `needs_context()` branch can go. WI-35's quoted code is already stale against the four items that patch the same loop.
+- **WI-27 subsumes WI-15.** Both rewrite `dispatch_on_tool_error` with incompatible signatures. If WI-27 is taken, drop WI-15 and move its two upstream test ports into WI-27's list. If WI-27 is declined (see §8.3), WI-15 becomes the correct minimal fix and its citation needs correcting to `0.1.1 hooks/hook_runner.py:231-243`.
+
+### 8.3 Two decisions this forces
+
+1. **Hook signature finality.** WI-29 claims the `&str` `post_turn` signature is the last break to `Hook`. That is untrue if H5 (`HookContext` threading, audit §4.3) is ever adopted — it re-breaks every hook method. Either pull H5's *signature* half into the same commit, passing a `HookContext` whose state store is initially trivial, so downstream implementors break once; or explicitly decline H5 and record it in `docs/upstream-parity.md` §6. Do not ship a finality claim a later release contradicts.
+2. **May this release forward-port?** WI-27 (H4), WI-34 (T4), WI-22's `#[non_exhaustive]` and part of WI-20 are upstream API corrections from 0.1.6–0.1.9 that happen not to touch the wire. Either the release is *defects against the pinned 0.1.1 harness only* — in which case WI-27 shrinks to its genuine today-bugs, the missing `val.is_some()` guard at `src/local.rs:1161-1165` and the `StepStatus` downgrade at `:1170-1176` (a **Rust-only invention**, present in no upstream version) — or it explicitly permits wire-neutral forward-ports. State the rule once, in the audit's §6, and apply it uniformly.
+
+### 8.4 Land the CI subset before the clusters
+
+Nothing in this plan makes CI compile the wasm target, so **every `src/wasm.rs` mirror in these 41 items is unverified** — including WI-33's new `WeakConnection` and WI-38's `TriggerRunner`, both of which add wasm-only branches. Land the cheap subset of the audit's X3 first: `cargo check --target wasm32-unknown-unknown`, `cargo test --doc` with a `#[cfg(doctest)]` shim including `docs/*.md`, and a step that builds the three directory examples. Otherwise half of this work ships untested. This supersedes §4.1's "ship path-safety first" only in the sense that CI is cheaper and comes before it.
+
+---
+
+## 9. Additional items from the conflict pass
+
+Ten defects that are live today, not blocked on the migration, and covered by no item in §3. Four are audit rows nobody picked up; the rest surfaced while checking for collisions.
+
+| ID | What | api_break | Effort |
+|---|---|---|---|
+| **question-answer-index-mismatch** | User-question answers are written to the wrong question index when any question is not multiple-choice, and a failing interaction hook is silent | none | XS |
+| **single-consumer-receive-steps** | Concurrent receive_steps() calls silently split the stream; A5 already builds the flag needed to detect it | source-compatible-behaviour-change | XS |
+| **chatresponse-per-turn-steps** | ChatResponse.steps carries whole-session history although turn_start_indices is tracked — and A5 makes it worse | source-compatible-behaviour-change | XS |
+| **ask-question-builtin** | BuiltinTools is missing ASK_QUESTION (a 0.1.1 member), plus nondestructive()/none(); user_questions.enabled is hardcoded true | breaking | XS |
+| **predicate-args-fidelity** | Policy predicate args drop ActionEditFile.diff_block and inject non-proto keys — same function S5 refactors | none | S |
+| **harness-crash-diagnostics** | A harness crash ends the step stream silently and the captured stderr is thrown away | source-compatible-behaviour-change | S |
+| **wait-for-idle** | Connection has no wait_for_idle; A5's fallback poll loop is unsound on wasm without it | breaking | S |
+| **tool-context-state-atomicity** | X19 ships a documented read-modify-write race as the flagship example; add update_state before publishing it | none | XS |
+| **policy-docs-and-tool-name-selectors** | docs/policy.md is referenced by the plan but created by nothing, and the shipped policy examples can never match | none | S |
+| **step-error-and-ws-limits** | Two XS wire-adjacent defects the plan leaves open: ActionError.error_message is never read, and WS message size is at tungstenite defaults | none | XS |
+| **agent-input-validation** | Agent accepts empty prompts and unvalidated conversation_ids that upstream rejects | source-compatible-behaviour-change | XS |
+
+Two are worth reading before the rest:
+
+**`question-answer-index-mismatch`** (verified in-tree, `src/local.rs:934-981`). `questions_list` is built by filtering `q_req_clone.questions` down to multiple-choice entries only, but the response loop writes `proto_answers[orig_idx]` where `orig_idx` enumerates the *filtered* responses, while `proto_answers` is sized by the *unfiltered* list. If any question is not multiple-choice, every answer after it is recorded against the wrong question — and the variable is named `orig_idx` as though it were the original index. A hook returning more responses than there are questions indexes out of bounds, which in this crate (`panic = deny`) aborts the process.
+
+**`wait-for-idle`** is a prerequisite hiding in plain sight: WI-13 (A5) needs it, and lacking it ships a `while !self.conn.is_idle()` poll loop that its own spec flags as unsound on wasm. Add the `Notify`-based wait to the `Connection` trait in the same release, or WI-13 lands with a known-bad fallback.
+
