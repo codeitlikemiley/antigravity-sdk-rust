@@ -589,7 +589,10 @@ impl LocalConnectionStrategy {
         for w in &self.workspaces {
             proto_workspaces.push(ProtoWorkspace {
                 workspace_type: Some(WorkspaceType::FilesystemWorkspace(FilesystemWorkspace {
-                    directory: Some(w.clone()),
+                    // Upstream normalizes on the way out (0.1.1
+                    // local_connection.py:1418), so the harness and the client-side
+                    // policy layer scope the same directories.
+                    directory: Some(crate::wire_path::normalize_wire_path(w)),
                 })),
             });
         }
@@ -805,7 +808,7 @@ impl LocalConnectionStrategy {
                                             };
 
                                             let mut tool_calls = Vec::new();
-                                            if let Some(tc) = extract_builtin_tool_call(&step_update) {
+                                            if let Some(tc) = crate::step_extract::extract_builtin_tool_call(&step_update) {
                                                 tool_calls.push(tc);
                                             }
 
@@ -1003,7 +1006,7 @@ impl LocalConnectionStrategy {
                                                 let pending_calls = pending_builtin_tool_calls.clone();
                                                 tokio::spawn(async move {
                                                     let mut allow = true;
-                                                    let tool_call = extract_builtin_tool_call(&step_update_clone);
+                                                    let tool_call = crate::step_extract::extract_builtin_tool_call(&step_update_clone);
                                                     if let Some(ref tc) = tool_call {
                                                         if let Some(ref runner) = hook_runner {
                                                             let pre_call = runner.dispatch_pre_tool_call(tc).await;
@@ -1290,132 +1293,12 @@ impl StepTracker {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn extract_builtin_tool_call(
-    step_update: &crate::proto::localharness::StepUpdate,
-) -> Option<ToolCall> {
-    let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
-    let step_idx = step_update.step_index.unwrap_or(0);
-    let id = format!("{traj_id}_{step_idx}");
-
-    if step_update.invoke_subagent.is_some() {
-        return Some(ToolCall {
-            id,
-            name: "START_SUBAGENT".to_string(),
-            args: serde_json::json!({
-                "prompt": step_update.request_text.clone().unwrap_or_default()
-            }),
-            canonical_path: None,
-        });
-    }
-
-    if let Some(ref fd) = step_update.find_file {
-        return Some(ToolCall {
-            id,
-            name: "FIND_FILE".to_string(),
-            args: serde_json::json!({
-                "directory_path": fd.directory_path,
-                "query": fd.query,
-            }),
-            canonical_path: fd.directory_path.clone(),
-        });
-    }
-    if let Some(ref run) = step_update.run_command {
-        return Some(ToolCall {
-            id,
-            name: "RUN_COMMAND".to_string(),
-            args: serde_json::json!({
-                "command_line":    run.command_line,
-                "working_dir":     run.working_dir,
-                // Include the execution result fields so the frontend
-                // can display stdout/stderr instead of "(no output)".
-                "combined_output": run.combined_output,
-                "exit_code":       run.exit_code,
-            }),
-            canonical_path: None,
-        });
-    }
-    if let Some(ref view) = step_update.view_file {
-        return Some(ToolCall {
-            id,
-            name: "VIEW_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": view.file_path,
-                "start_line": view.start_line,
-                "end_line": view.end_line,
-            }),
-            canonical_path: view.file_path.clone(),
-        });
-    }
-    if let Some(ref write) = step_update.create_file {
-        return Some(ToolCall {
-            id,
-            name: "CREATE_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": write.file_path,
-                "contents": write.contents,
-            }),
-            canonical_path: write.file_path.clone(),
-        });
-    }
-    if let Some(ref edit) = step_update.edit_file {
-        return Some(ToolCall {
-            id,
-            name: "EDIT_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": edit.file_path,
-            }),
-            canonical_path: edit.file_path.clone(),
-        });
-    }
-    if let Some(ref search) = step_update.search_directory {
-        // The harness puts grep/search results into `step_update.text`.
-        // Pack them into `args.output` so the frontend can display them,
-        // mirroring how RUN_COMMAND packs `combined_output`.
-        return Some(ToolCall {
-            id,
-            name: "SEARCH_DIR".to_string(),
-            args: serde_json::json!({
-                "directory_path": search.directory_path,
-                "query": search.query,
-                "num_results": search.num_results,
-                // Actual grep results from the harness
-                "output": step_update.text,
-            }),
-            canonical_path: search.directory_path.clone(),
-        });
-    }
-    if let Some(ref list) = step_update.list_directory {
-        return Some(ToolCall {
-            id,
-            name: "LIST_DIR".to_string(),
-            args: serde_json::json!({
-                "directory_path": list.directory_path,
-            }),
-            canonical_path: list.directory_path.clone(),
-        });
-    }
-    if let Some(ref img_gen) = step_update.generate_image {
-        return Some(ToolCall {
-            id,
-            name: "GENERATE_IMAGE".to_string(),
-            args: serde_json::json!({
-                "prompt": img_gen.prompt,
-                "image_paths": img_gen.image_paths,
-                "image_name": img_gen.image_name,
-            }),
-            canonical_path: None,
-        });
-    }
-    None
-}
-
 fn extract_tool_result(step_update: &crate::proto::localharness::StepUpdate) -> Option<ToolResult> {
     let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
     let step_idx = step_update.step_index.unwrap_or(0);
     let id = format!("{traj_id}_{step_idx}");
 
-    let tool_call = extract_builtin_tool_call(step_update)?;
+    let tool_call = crate::step_extract::extract_builtin_tool_call(step_update)?;
     let result = step_update.text.clone().map(Value::String);
     let error = step_update.error_message.clone();
 

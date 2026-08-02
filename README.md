@@ -410,12 +410,19 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 ```
 
-### Google Search Grounding & Web Search Fallback
+### Google Search Grounding
 
-The SDK supports server-side Google Search grounding and provides a client-side search fallback:
+Enable Gemini's native Google Search grounding tool by setting
+`enable_google_search: Some(true)` in `GeminiConfig`, which lets the model
+perform search queries server-side and return up-to-date information.
 
-- **Google Search Grounding**: Enable Gemini's native Google Search grounding tool by setting `enable_google_search: Some(true)` in `GeminiConfig`. This enables the model to natively perform search queries server-side to return up-to-date online information.
-- **Web Search Fallback**: If the model decides to invoke a tool call named `google_search` or `web_search` and no custom search tool has been registered with `ToolRunner`, the SDK automatically runs a built-in search fallback. On native platforms, it spawns a `python3` subprocess to scrape and parse DuckDuckGo search results. On WASM platforms, it returns an empty result block indicating search is not available.
+> **Removed:** earlier versions intercepted any tool call named `google_search`
+> or `web_search` and ran a built-in fallback that spawned `python3` to scrape
+> DuckDuckGo. It had no counterpart in the Python SDK, added undeclared network
+> egress and a hidden Python dependency, and shadowed the harness-side
+> `search_web` tool. Unregistered tools now return `Unknown tool: '<name>'`,
+> matching upstream. Register your own `Tool` implementation if you need
+> client-side search.
 
 ### Client-Side Tool Step Updates
 
