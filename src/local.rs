@@ -4,6 +4,10 @@
 //! agent subprocess, perform the initial handshake, and transition to a WebSocket session
 //! wrapped by [`LocalConnection`].
 
+/// How long to wait for the harness's handshake reply. A pre-0.1.4 harness
+/// never sends one, so this bounds that case rather than failing it.
+const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
@@ -60,6 +64,20 @@ pub struct LocalConnection {
     parent_idle: Arc<Mutex<bool>>,
     active_subagent_ids: Arc<Mutex<HashSet<String>>>,
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
+    /// Steps the harness replayed in its handshake reply, for a resumed
+    /// conversation. Seeding `Conversation` with these is the remaining
+    /// half of WP-6.
+    initial_history: Vec<Step>,
+}
+
+impl LocalConnection {
+    /// Steps the harness replayed when the conversation was resumed.
+    ///
+    /// Empty for a new conversation, and for any harness older than 0.1.4.
+    #[must_use]
+    pub fn initial_history(&self) -> &[Step] {
+        &self.initial_history
+    }
 }
 
 impl std::fmt::Debug for LocalConnection {
@@ -341,6 +359,8 @@ pub struct LocalConnectionStrategy {
     pub hook_runner: Option<HookRunner>,
     /// Conversation ID for standard session resuming or tracking.
     pub conversation_id: String,
+    /// How the conversation attaches to harness-side session state.
+    pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -359,6 +379,7 @@ impl LocalConnectionStrategy {
         tool_runner: Option<ToolRunner>,
         hook_runner: Option<HookRunner>,
         conversation_id: String,
+        session_continuation_mode: Option<crate::types::SessionContinuationMode>,
         mcp_servers: Vec<McpServerConfig>,
     ) -> Self {
         Self {
@@ -372,6 +393,7 @@ impl LocalConnectionStrategy {
             tool_runner,
             hook_runner,
             conversation_id,
+            session_continuation_mode,
             mcp_servers,
         }
     }
@@ -657,7 +679,9 @@ impl LocalConnectionStrategy {
             // Each of these is its own work package (WP-6 session continuation
             // and retry, WP-8 hooks, WP-9 MCP and subagents). Explicitly unset
             // so `cargo build` flags them again when those land.
-            session_continuation_mode: None,
+            session_continuation_mode: self
+                .session_continuation_mode
+                .map(crate::types::SessionContinuationMode::as_proto),
             retry_config: None,
             enabled_hooks: Vec::new(),
             custom_subagents: Vec::new(),
@@ -684,6 +708,60 @@ impl LocalConnectionStrategy {
         };
         let init_json = serde_json::to_string(&init_event)?;
         ws_write.send(WsMessage::Text(init_json)).await?;
+
+        // Read the handshake reply before anything else. Since 0.1.4 the harness
+        // answers InitializeConversationEvent with an OutputEvent carrying
+        // initialize_conversation_response, and upstream blocks on it
+        // (local_connection.py:1162-1176). Skipping it leaves the frame to be
+        // picked up by the step reader, where it is not a step.
+        //
+        // `cascade_id` from the response is deliberately ignored: upstream takes
+        // the conversation id from the first StepUpdate's trajectory_id instead
+        // (event_processor.py:478-480).
+        let initial_history: Vec<Step> = match tokio::time::timeout(
+            std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS),
+            ws_read.next(),
+        )
+        .await
+        {
+            Ok(Some(Ok(WsMessage::Text(raw)))) => {
+                match serde_json::from_str::<OutputEvent>(&raw) {
+                    Ok(OutputEvent {
+                        event:
+                            Some(crate::proto::localharness::output_event::Event::InitializeConversationResponse(
+                                resp,
+                            )),
+                        ..
+                    }) => resp
+                        .history
+                        .iter()
+                        .filter_map(crate::step_extract::step_from_update)
+                        .collect(),
+                    Ok(_) => {
+                        // A harness that answers with something else is not one
+                        // we understand; surfacing it beats guessing.
+                        tracing::warn!("first frame was not initialize_conversation_response");
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "could not parse the harness handshake reply: {e}. This usually means \
+                             the harness is a different version than proto/localharness.proto was \
+                             generated from — see scripts/gen_proto.py."
+                        ));
+                    }
+                }
+            }
+            Ok(Some(Err(e))) => return Err(anyhow!("harness closed during handshake: {e}")),
+            Ok(None) => return Err(anyhow!("harness closed the socket during handshake")),
+            // Pre-0.1.4 harnesses never answer. Continuing keeps this SDK working
+            // against the version scripts/install_harness.sh still pins.
+            Err(_) => {
+                tracing::debug!("no handshake reply within {HANDSHAKE_TIMEOUT_SECONDS}s");
+                Vec::new()
+            }
+            Ok(Some(Ok(_))) => Vec::new(),
+        };
 
         // 6. Spawn Background WS Sender Loop
         let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<String>();
@@ -1295,6 +1373,7 @@ impl LocalConnectionStrategy {
             parent_idle,
             active_subagent_ids,
             step_trackers,
+            initial_history,
         })
     }
 }

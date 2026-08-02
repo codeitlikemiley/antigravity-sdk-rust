@@ -47,6 +47,12 @@ pub struct AgentConfig {
     pub response_schema: Option<String>,
     /// MCP server configurations to connect to external tool servers.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// How the conversation attaches to harness-side session state.
+    ///
+    /// Leave unset for a new conversation. Set `CreateOrResume` when supplying
+    /// a `conversation_id`: without it a current harness attempts a resume and
+    /// fails when the conversation does not exist.
+    pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -67,6 +73,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("app_data_dir", &self.app_data_dir)
             .field("response_schema", &self.response_schema)
             .field("mcp_servers", &self.mcp_servers)
+            .field("session_continuation_mode", &self.session_continuation_mode)
             .finish()
     }
 }
@@ -246,6 +253,18 @@ impl Agent<Unstarted> {
             // strategy) all read the one field.
             let workspaces = crate::workspace::resolve(self.config.workspaces.as_ref());
 
+            // Upstream rejects RESUME without an id at config time
+            // (connection.py:109-117); this crate has no config-validation hook,
+            // so it is checked here.
+            if self.config.session_continuation_mode
+                == Some(crate::types::SessionContinuationMode::Resume)
+                && self.config.conversation_id.is_none()
+            {
+                return Err(anyhow!(
+                    "conversation_id must be specified when session_continuation_mode is Resume"
+                ));
+            }
+
             // 4. Set up policies
             let final_policies = compose_policies(
                 self.config.policies.clone(),
@@ -342,6 +361,7 @@ impl Agent<Unstarted> {
                     Some(self.tool_runner.clone()),
                     Some(self.hook_runner.clone()),
                     self.config.conversation_id.clone().unwrap_or_default(),
+                    self.config.session_continuation_mode,
                     self.config.mcp_servers.clone(),
                 );
 
@@ -522,6 +542,19 @@ impl<P> AgentBuilder<P> {
             config: self.config,
             _policy_marker: std::marker::PhantomData,
         }
+    }
+
+    /// Sets how the conversation attaches to harness-side session state.
+    ///
+    /// Pair with [`conversation_id`](Self::conversation_id): a current harness
+    /// refuses a caller-supplied id it has never seen unless this is
+    /// `CreateOrResume`.
+    pub const fn session_continuation_mode(
+        mut self,
+        mode: crate::types::SessionContinuationMode,
+    ) -> Self {
+        self.config.session_continuation_mode = Some(mode);
+        self
     }
 
     pub fn conversation_id(mut self, conversation_id: impl Into<String>) -> Self {

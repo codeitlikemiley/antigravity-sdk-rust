@@ -14,6 +14,37 @@ pub const DEFAULT_MODEL: &str = "gemini-3.5-flash";
 /// The default image generation model name used.
 pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gemini-3.1-flash-image-preview";
 
+/// How a conversation attaches to harness-side session state.
+///
+/// Mirrors upstream `SessionContinuationMode` (`types.py:654-664`, added 0.1.7).
+///
+/// This matters whenever a `conversation_id` is supplied: with the field unset,
+/// a 0.1.9 harness attempts a resume and **fails** if the conversation does not
+/// exist ("conversation ... not found (cannot resume)"). `CreateOrResume` is
+/// what makes a caller-chosen id work for both a new and an existing session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionContinuationMode {
+    /// Resume an existing conversation; error if it does not exist.
+    Resume,
+    /// Resume if it exists, otherwise create it.
+    CreateOrResume,
+    /// Always create; error if the conversation already exists.
+    CreateOnly,
+}
+
+impl SessionContinuationMode {
+    /// The proto enum value (`HarnessConfig.SessionContinuationMode`).
+    #[must_use]
+    pub const fn as_proto(self) -> i32 {
+        match self {
+            Self::Resume => 1,
+            Self::CreateOrResume => 2,
+            Self::CreateOnly => 3,
+        }
+    }
+}
+
 /// Configures the intensity of the reasoning/thinking process for models that support it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

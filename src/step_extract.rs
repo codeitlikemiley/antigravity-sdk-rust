@@ -113,3 +113,49 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
         canonical_path,
     })
 }
+
+/// Maps a replayed `StepUpdate` onto a [`Step`].
+///
+/// Used for the history the harness returns in its handshake reply. This is a
+/// narrower mapping than the live reader performs: replayed steps carry no
+/// deltas, no in-flight tool state and no usage rollup, so only the fields that
+/// survive a round trip are populated.
+pub fn step_from_update(step_update: &StepUpdate) -> Option<crate::types::Step> {
+    use crate::types::{Step, StepSource, StepStatus, StepTarget, StepType};
+
+    let trajectory_id = step_update.trajectory_id.clone().unwrap_or_default();
+    let step_index = step_update.step_index.unwrap_or(0);
+
+    Some(Step {
+        id: format!("{trajectory_id}_{step_index}"),
+        step_index,
+        r#type: if step_update.finish.is_some() {
+            StepType::Finish
+        } else {
+            StepType::TextResponse
+        },
+        source: match step_update.source {
+            Some(1) => StepSource::System,
+            Some(2) => StepSource::User,
+            Some(3) => StepSource::Model,
+            _ => StepSource::Unknown,
+        },
+        target: match step_update.target {
+            Some(1) => StepTarget::User,
+            _ => StepTarget::Unknown,
+        },
+        status: match step_update.state {
+            Some(1) => StepStatus::Active,
+            Some(2) => StepStatus::Done,
+            Some(3) => StepStatus::WaitingForUser,
+            Some(4) => StepStatus::TerminalError,
+            _ => StepStatus::Unknown,
+        },
+        content: step_update.text.clone().unwrap_or_default(),
+        thinking: step_update.thinking.clone().unwrap_or_default(),
+        error: step_update.error_message.clone().unwrap_or_default(),
+        cascade_id: step_update.cascade_id.clone().unwrap_or_default(),
+        trajectory_id,
+        ..Default::default()
+    })
+}
