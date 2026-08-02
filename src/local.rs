@@ -1250,7 +1250,13 @@ impl LocalConnectionStrategy {
                                                         let tr = ToolResult {
                                                             name: tc.name.clone(),
                                                             id: Some(tc.id.clone()),
-                                                            result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(Value::String)),
+                                                            // Structured per tool, so a hook can read an
+                                                            // exit code or a content path instead of
+                                                            // parsing display text (N3). Falls back to
+                                                            // the text for anything unrecognised.
+                                                            result: crate::tool_output::structured_result(&step_update)
+                                                                .or_else(|| extracted.and_then(|r| r.result))
+                                                                .or_else(|| step_update.text.clone().map(Value::String)),
                                                             error: None,
                                                             server_name: None,
                                                             exception: None,

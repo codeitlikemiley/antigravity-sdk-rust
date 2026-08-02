@@ -57,7 +57,7 @@ Twelve items, none blocking each other except where noted.
 | ~~hook-dispatch~~ | **Done** — `src/hook_dispatch.rs` | `hook_dispatch.rs` (new) | XS |
 | ~~H1a~~ | **Done** — `gate_turn` runs before any state is touched, so a denied turn leaves the connection untouched; a hook that errors denies, matching S2 | `hook_dispatch.rs`, both transports | S |
 | ~~H12~~ | **Done** — a non-main trajectory going idle dispatches `post_tool_call` for `START_SUBAGENT`, carrying the subagent's last model text (or its trajectory id). `examples/subagents.rs` now fires | `local.rs`, `wasm.rs` | S |
-| N3 | Structured per-tool results for harness-executed built-ins | `tool_output.rs` (new), both transports | M |
+| ~~N3~~ | **Done** — `src/tool_output.rs`; a hook reads an exit code or a content path instead of parsing display text | `tool_output.rs` (new), both transports | M |
 
 ---
 
@@ -159,7 +159,7 @@ plans.
 **Phase A is complete.**
 That is the milestone worth cutting a release around.
 
-### Phase B — the non-breaking release (0.1.15)
+### Phase B — the non-breaking release (0.1.15) — **complete**
 
 | # | Batch | Items | Size |
 |---|---|---|---|
@@ -167,7 +167,7 @@ That is the milestone worth cutting a release around.
 | ~~B2~~ | Hook plumbing module — **done**. H1c (`session_end` from `disconnect`) and H9 (contain an erroring `on_tool_error`) already landed earlier in this branch; H9's shape changed again with H4 | `hook-dispatch`, H1c, H9 | S |
 | ~~B3~~ | Turn hooks — **done** | H1a (`pre_turn` with deny semantics), H12 | S |
 | ~~B4~~ | Conversation drain — **done** | A5 + `wait-for-idle` | M |
-| B5 | Structured tool results | N3 | M |
+| ~~B5~~ | Structured tool results — **done** | N3 | M |
 | ~~B6~~ | Small correctness — **done** | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
 | ~~B7~~ | WP-2 tail — **done**. `session_end` request and its acknowledgement, the `callHookRequest` branch (E4), and the CI subset | M |
 

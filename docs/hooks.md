@@ -713,3 +713,15 @@ on a tool's bookkeeping.
 `update` stay local. `update` deliberately does not walk: a read-modify-write
 that fell through to a parent would write its result locally and leave the
 parent stale, which reads as a lost update.
+
+## What `post_tool_call` receives for a built-in
+
+`ToolResult::result` carries a structured object per tool rather than the
+harness's display text: `RUN_COMMAND` reports `exit_code` and
+`combined_output`, `READ_URL_CONTENT` reports `content_path` and `title`,
+`EDIT_FILE` reports the `diff_block`. A hook that wanted a command's exit code
+previously had to parse prose, and one that wanted a fetched page's location
+could not get it at all.
+
+Anything the SDK does not recognise still falls back to the step's text, so an
+unfamiliar built-in degrades rather than disappearing.
