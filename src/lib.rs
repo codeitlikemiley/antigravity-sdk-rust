@@ -70,6 +70,7 @@ pub mod local;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod wasm;
 
+pub mod path_safety;
 pub mod policy;
 pub mod step_extract;
 pub mod tool_context;

@@ -6,7 +6,6 @@
 
 use crate::hooks::Hook;
 use crate::types::{HookResult, McpServerConfig, ToolCall};
-use std::path::Path;
 use std::sync::Arc;
 
 /// Represents the safety enforcement action to take when a tool invocation is intercepted.
@@ -175,19 +174,15 @@ pub fn workspace_only(workspaces: Vec<String>) -> Vec<Policy> {
     let is_outside_workspace = move |tc: &ToolCall| -> bool {
         let path_str = tc.canonical_path.as_deref().unwrap_or("");
         if path_str.is_empty() {
+            // policy.py:526-528 — a tool call carrying no path stays allowed.
             return false;
         }
-        let target_path = Path::new(path_str);
-        if !target_path.is_absolute() {
-            return true;
-        }
-        for ws in &workspaces {
-            let ws_path = Path::new(ws);
-            if ws_path.is_absolute() && target_path.starts_with(ws_path) {
-                return false;
-            }
-        }
-        true
+        // Resolution happens per workspace: `..`, `.` and symlinks are applied
+        // before comparison, and a resolution failure is treated as outside.
+        // A lexical prefix test would report `<ws>/../../etc/passwd` as inside.
+        !workspaces
+            .iter()
+            .any(|ws| crate::path_safety::is_path_in_workspace(path_str, ws))
     };
 
     let when_fn = Arc::new(is_outside_workspace);
@@ -872,6 +867,44 @@ mod tests {
         let tc2 = make_tool_call("VIEW_FILE", json!({"path": "/forbidden/path/file.rs"}));
         let res2 = enforcer.pre_tool_call(&tc2).await.unwrap();
         assert!(!res2.allow);
+    }
+
+    /// The workspace sandbox is the only thing standing between a
+    /// model-controlled path and the rest of the disk, and a lexical prefix
+    /// test does not provide it: `Path::starts_with` reported both of these as
+    /// inside the workspace, so `view_file` on `/etc/passwd` was allowed.
+    #[tokio::test]
+    async fn test_workspace_only_rejects_parent_traversal() {
+        let policies = workspace_only(vec!["/allowed/workspace".to_string()]);
+        let enforcer = enforce(policies, None).unwrap();
+
+        for escape in [
+            "/allowed/workspace/../../etc/passwd",
+            "/allowed/workspace/./../secret",
+            "/allowed/workspace/sub/../../../etc/shadow",
+        ] {
+            let tc = make_tool_call("VIEW_FILE", json!({ "path": escape }));
+            let res = enforcer.pre_tool_call(&tc).await.unwrap();
+            assert!(!res.allow, "escape should be denied: {escape}");
+        }
+
+        // A `..` that stays inside the workspace is still allowed.
+        let inside = make_tool_call(
+            "VIEW_FILE",
+            json!({"path": "/allowed/workspace/sub/../file.rs"}),
+        );
+        let res = enforcer.pre_tool_call(&inside).await.unwrap();
+        assert!(res.allow);
+    }
+
+    /// An empty workspace list denies every scoped tool that carries a path —
+    /// upstream `policy.py:530`. `Agent::start` never constructs this case
+    /// (it skips the prepend entirely), but `workspace_only` is public.
+    #[tokio::test]
+    async fn test_workspace_only_with_no_roots_denies() {
+        let enforcer = enforce(workspace_only(vec![]), None).unwrap();
+        let tc = make_tool_call("VIEW_FILE", json!({"path": "/anywhere/file.rs"}));
+        assert!(!enforcer.pre_tool_call(&tc).await.unwrap().allow);
     }
 
     #[tokio::test]
