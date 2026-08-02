@@ -1671,17 +1671,16 @@ mod tests {
         assert_eq!(tc.id, "traj_1_2");
         assert_eq!(tc.name, "RUN_COMMAND");
         assert_eq!(tc.canonical_path, None);
-        // The execution-result fields are always present, `null` until the
-        // harness reports them. This assertion previously omitted them: the
-        // wasm extractor was a stale fork of the native one, and the two are
-        // now a single implementation in `crate::step_extract`.
+        // Arguments only. `combined_output` and `exit_code` are results and
+        // were carried here for a while: a `pre_tool_call` predicate reading
+        // them saw them null, because the command has not run, so a rule built
+        // on them silently allowed everything. They reach `post_tool_call` on
+        // the `ToolResult` instead.
         assert_eq!(
             tc.args,
             serde_json::json!({
                 "command_line": "echo hello",
-                "working_dir": "work_dir",
-                "combined_output": null,
-                "exit_code": null
+                "working_dir": "work_dir"
             })
         );
 

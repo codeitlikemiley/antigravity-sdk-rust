@@ -55,13 +55,14 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
     } else if let Some(ref run) = step_update.run_command {
         (
             "RUN_COMMAND",
+            // Only what the model asked for. `combined_output` and `exit_code`
+            // are *results*: a `pre_tool_call` predicate reading them would see
+            // them absent, because the command has not run yet, and a rule
+            // built on that reads as "always allow". The completed results
+            // reach `post_tool_call` through `tool_output::structured_result`.
             serde_json::json!({
-                "command_line":    run.command_line,
-                "working_dir":     run.working_dir,
-                // Include the execution result fields so the frontend
-                // can display stdout/stderr instead of "(no output)".
-                "combined_output": run.combined_output,
-                "exit_code":       run.exit_code,
+                "command_line": run.command_line,
+                "working_dir":  run.working_dir,
             }),
         )
     } else if let Some(ref view) = step_update.view_file {
@@ -94,17 +95,13 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
             }),
         )
     } else if let Some(ref search) = step_update.search_directory {
-        // The harness puts grep/search results into `step_update.text`.
-        // Pack them into `args.output` so the frontend can display them,
-        // mirroring how RUN_COMMAND packs `combined_output`.
+        // `output` and `num_results` are results, not arguments — same reason
+        // as RUN_COMMAND above. They arrive on the `ToolResult` instead.
         (
             "SEARCH_DIR",
             serde_json::json!({
                 "directory_path": search.directory_path,
                 "query": search.query,
-                "num_results": search.num_results,
-                // Actual grep results from the harness
-                "output": step_update.text,
             }),
         )
     } else if let Some(ref list) = step_update.list_directory {

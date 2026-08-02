@@ -6,7 +6,19 @@ Every row is a unit of work that can be picked up on its own once its blockers
 are clear. Item IDs match the two plans — read the corresponding section there
 before starting one.
 
-**Status as of 2026-08-02.** Phase A is complete except A2's `is_idle` flip (C2) and A5's wasm half. 16 items landed: WI-1…WI-8 and WI-14 (merged in
+**Status as of 2026-08-02.** **Every batch in this document is complete.** All
+five phases — A (connection), B (0.1.15), C (capability surface), D (0.2.0
+break), E (hooks and public API) — have landed on
+`claude/antigravity-python-upstream-changes-ux2sc1`.
+
+Two scope decisions worth carrying forward rather than losing in the diff:
+`DebugConfig` has no field in the 0.1.9 proto, so it is out of scope rather than
+pending; and the explicit model list is `GeminiConfig::model_targets`, because
+`models` was already the crate's shorthand form — a deliberate divergence from
+upstream's naming.
+
+Historical note — 16 items landed at the time this status line was first
+written: WI-1…WI-8 and WI-14 (merged in
 #8); WP-1, the core of WP-2, the core of WP-6 and C5 (open in #9).
 
 > **The handshake now works.** `connect()` reads
@@ -35,12 +47,12 @@ sanitization; 127.0.0.1 connect fallback.
 | ~~WP-6~~ | **Done** on both transports; `DebugConfig` is not in the 0.1.9 proto and is out of scope | S | — |
 | ~~WP-2 tail~~ | **Done** — `session_end` handshake, `callHookRequest` exercised end to end, wasm mock uses real frames | S | — |
 | **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
-| WP-4 | Model configuration public API — `ModelTarget` / `ModelEndpoint` replacing `GeminiConfig`; the wire shape is already correct, this is the type graph and the env-var routing | L | WP-1 |
-| WP-7 | Tool runner correctness: `error_message` on the wire, argument coercion, `ToolContext` wiring, media extraction | M | WP-1 |
-| WP-9 | Capability surface: MCP servers on the wire, `search_web`/`read_url_content`, custom subagents, retry config, tool-name casing | L | WP-1, WP-4 |
-| WP-8 | Harness-side hook channel: `LifecycleHook`, `CallHookRequest`/`Response`, the router, `enabled_hooks`. Largest single item; contains the `Hook` trait break | XL | WP-1, WP-5, WP-6 |
+| ~~WP-4~~ | Model configuration public API — **done** as C1–C3 | L | WP-1 |
+| ~~WP-7~~ | Tool runner correctness — **done** as D2 (`error_message`), D4 (coercion), D5 (`ToolContext`) and B5 (structured results) | M | WP-1 |
+| ~~WP-9~~ | Capability surface — **done** as C4, C5, C6, C7 | L | WP-1, WP-4 |
+| ~~WP-8~~ | Harness-side hook channel — **done** as E1–E5 | XL | WP-1, WP-5, WP-6 |
 | ~~WP-10~~ | **Done** across A10 (trigger narrowing), B4 and E6 | L | — |
-| WP-11 | Tooling, CI, docs, examples, skills — **the drift job landed**; the rest has been kept current batch by batch | M | — |
+| ~~WP-11~~ | Tooling, CI, docs, examples, skills — **done**; the drift job is the new part | M | — |
 
 **WP-3** (security hardening) is complete — it landed as WI-1…WI-8 in #8.
 
@@ -107,7 +119,7 @@ blocked on the migration.
 |---|---|---|
 | ~~wait-for-idle~~ | **Done** — `Connection::wait_for_idle` is watch-backed, not a poll loop; also on `Conversation` | S |
 | ~~harness-crash-diagnostics~~ | **Done** — landed with A4 | S |
-| predicate-args-fidelity | **`diff_block` done.** Remaining: `SEARCH_DIR`/`RUN_COMMAND` args still carry non-proto result keys (`output`, `combined_output`, `exit_code`) that a predicate cannot rely on before execution | XS |
+| ~~predicate-args-fidelity~~ | **Done**. `args` carries arguments only; the result keys a predicate saw as null before execution now arrive on the `ToolResult` | XS |
 | ~~single-consumer-receive-steps~~ | **Done** — the connection hands out one live stream at a time and a second subscriber gets an error rather than half the steps. The claim is released when the stream drops, so the per-turn call still works | XS |
 | ~~ask-question-builtin~~ | **Done** — `BuiltinTools::AskQuestion` (`ASK_QUESTION`), in `all_tools()`, and `user_questions.enabled` now follows it. Behaviour change: a caller passing `enabled_tools` explicitly must include it to keep the question panel, where before it was on unconditionally | XS |
 
