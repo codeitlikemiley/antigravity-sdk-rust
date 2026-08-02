@@ -32,7 +32,7 @@ sanitization; 127.0.0.1 connect fallback.
 
 | ID | What | Size | Blocked by |
 |---|---|---|---|
-| WP-6 | Core landed; remainder landed as A5 except the wasm handshake read and `DebugConfig` | S | — |
+| ~~WP-6~~ | **Done** on both transports; `DebugConfig` is not in the 0.1.9 proto and is out of scope | S | — |
 | WP-2 tail | `session_end` reply; a `callHookRequest` branch so WP-8 is exercisable; assert `clientInfo.os`/`env` on the handshake; replace the wasm in-file mock's closed Rust→Rust loop with real fixtures | S | — |
 | **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
 | WP-4 | Model configuration public API — `ModelTarget` / `ModelEndpoint` replacing `GeminiConfig`; the wire shape is already correct, this is the type graph and the env-var routing | L | WP-1 |
@@ -154,9 +154,9 @@ plans.
 | ~~A2~~ | Sentinel restructure — **done** | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
 | ~~A3~~ | Cancellation — **done**. `Conversation::cancel()` sets a `cancel_requested` flag on the connection; the reader converts the harness's plain `STATE_FULLY_IDLE` into `AntigravityError::Cancelled`, and `send()` clears the flag so it cannot leak into the next turn. Covered by `test_cancel_surfaces_cancelled_error` | S | A cancelled turn is distinguishable from a completed one |
 | ~~A4~~ | Turn-level errors — **done**. The stderr reader keeps a 20-line tail; when the socket closes before idle, the stream yields `harness connection closed before the turn finished` with those lines attached. Covered by `test_harness_crash_surfaces_stderr_tail` | S | A turn that fails server-side surfaces an error instead of ending silently |
-| A5 | WP-6 remainder — **done on the native transport**: `Conversation::seed_history()` seeded from the handshake reply (turn boundaries recovered from user-sourced steps), `AgentConfig::env` on `InputConfig.env`, a per-conversation temp `save_dir` default, and a 127.0.0.1 fallback for hosts where `localhost` resolves to ::1 first. **Remaining**: the same seeding on wasm (its reader loop is already running when the reply arrives, so `connect()` has nothing to hand back — it needs local.rs's blocking handshake read), and `DebugConfig`, which is not in the 0.1.9 proto and needs an upstream reading before it is designed | M | A resumed conversation starts with its history |
+| ~~A5~~ | WP-6 remainder — **done on both transports**. The wasm half publishes the handshake reply from the reader task and `initial_history()` awaits it, since that transport shares one socket and has no split stream to read inline. `DebugConfig` is not in the 0.1.9 proto and is dropped from scope rather than invented | M | A resumed conversation starts with its history |
 
-**After Phase A the SDK should complete a real turn against a 0.1.9 harness.**
+**Phase A is complete.**
 That is the milestone worth cutting a release around.
 
 ### Phase B — the non-breaking release (0.1.15)

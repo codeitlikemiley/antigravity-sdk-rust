@@ -363,10 +363,15 @@ impl Agent<Unstarted> {
                 };
 
                 let conn = strategy.connect().await?;
+                // The handshake reply arrives on the reader task here, so this
+                // waits for it rather than reading it inline as the native
+                // transport does.
+                let replayed = conn.initial_history().await;
                 let conversation = Arc::new(Conversation::new(
                     crate::connection::AnyConnection::Wasm(Arc::new(conn)),
                     None,
                 ));
+                conversation.seed_history(replayed).await;
                 self.tool_runner
                     .set_context(Arc::new(crate::tool_context::ToolContext::new(
                         conversation.connection().downgrade(),

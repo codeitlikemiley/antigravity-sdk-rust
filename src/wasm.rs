@@ -3,6 +3,12 @@
 //! This module provides a WebSocket-based harness connection for WebAssembly environments,
 //! connecting to the host `localharness` process over the network.
 
+/// How long `initial_history()` waits for the harness handshake reply.
+///
+/// A pre-0.1.4 harness never answers; the wait then expires and the session
+/// starts with no replayed history, which is correct for one.
+const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+
 use anyhow::{Result, anyhow};
 use futures_util::stream::{self, BoxStream, StreamExt};
 use serde_json::Value;
@@ -393,6 +399,9 @@ impl WasmConnectionStrategy {
         // upstream has (C2).
         let is_idle = Arc::new(AtomicBool::new(true));
         let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
+        let (initial_history_tx, _initial_history_rx) =
+            tokio::sync::watch::channel::<Option<Vec<Step>>>(None);
+        let conn_initial_history = initial_history_tx.clone();
         let conn_idle_tx = idle_tx.clone();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
@@ -892,15 +901,21 @@ impl WasmConnectionStrategy {
                                             // during the handshake — and seeding the conversation
                                             // with `resp.history` on a resumed session — is WP-6;
                                             // until then a resumed session silently starts empty.
+                                            // The reader loop is already running when this
+                                            // frame arrives — this transport has no split
+                                            // stream to read from before spawning — so the
+                                            // replayed history is published here and awaited
+                                            // by `initial_history()` (A5).
                                             tracing::debug!(
-                                                // Not seeded into the Conversation on this transport:
-                                                // unlike the local one, the reader loop is already
-                                                // running when this frame arrives, so `connect()` has
-                                                // no history to hand back. Seeding it needs the same
-                                                // blocking handshake read local.rs does (A5).
-                                                "initialize_conversation_response ({} history steps) — not yet consumed, see A5",
+                                                "initialize_conversation_response ({} history steps)",
                                                 resp.history.len()
                                             );
+                                            let replayed: Vec<Step> = resp
+                                                .history
+                                                .iter()
+                                                .filter_map(crate::step_extract::step_from_update)
+                                                .collect();
+                                            let _ = conn_initial_history.send(Some(replayed));
                                         }
                                         crate::proto::localharness::output_event::Event::CallHookRequest(req) => {
                                             // The harness blocks its turn until a
@@ -1132,6 +1147,7 @@ impl WasmConnectionStrategy {
             cancel_requested,
             steps_consumed: Arc::new(AtomicBool::new(false)),
             idle_tx,
+            initial_history_tx,
             subagent_responses,
         })
     }
@@ -1161,9 +1177,36 @@ pub struct WasmConnection {
     steps_consumed: Arc<AtomicBool>,
     /// Mirrors `is_idle` for [`Connection::wait_for_idle`].
     idle_tx: tokio::sync::watch::Sender<bool>,
+    /// The handshake reply's replayed history, published by the reader.
+    initial_history_tx: tokio::sync::watch::Sender<Option<Vec<Step>>>,
     /// Last model text per subagent trajectory; see the capture site in the
     /// reader loop. Cleared per turn.
     subagent_responses: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl WasmConnection {
+    /// Steps the harness replayed when the conversation was resumed.
+    ///
+    /// Waits for the handshake reply, which arrives on the reader task rather
+    /// than being read inline: this transport shares one socket and has no
+    /// split stream to read from before the reader starts. Returns empty on
+    /// timeout, which is what a pre-0.1.4 harness produces — it never answers.
+    pub async fn initial_history(&self) -> Vec<Step> {
+        let mut rx = self.initial_history_tx.subscribe();
+        let already_here = rx.borrow_and_update().clone();
+        if let Some(history) = already_here {
+            return history;
+        }
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS),
+            rx.wait_for(Option::is_some),
+        )
+        .await;
+        match waited {
+            Ok(Ok(history)) => history.clone().unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl Connection for WasmConnection {
