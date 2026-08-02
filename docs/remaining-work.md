@@ -6,13 +6,25 @@ Every row is a unit of work that can be picked up on its own once its blockers
 are clear. Item IDs match the two plans — read the corresponding section there
 before starting one.
 
-**Status as of 2026-08-02.** 12 items landed: WI-1…WI-8 and WI-14 (merged in
-#8), WP-1 and the core of WP-2 (open in #9).
+**Status as of 2026-08-02.** 16 items landed: WI-1…WI-8 and WI-14 (merged in
+#8); WP-1, the core of WP-2, the core of WP-6 and C5 (open in #9).
 
-> **The SDK still cannot connect to a 0.1.9 harness.** Everything landed so far
-> fixes what we send and what we can parse. The harness's mandatory first frame,
-> `initialize_conversation_response`, is still never read, so a real connection
-> stalls at the handshake. **WP-6 is the single unblocker** — see §1.
+> **The handshake now works.** `connect()` reads
+> `initialize_conversation_response`, sends `session_continuation_mode`, and
+> shuts down in order so the harness persists its trajectory. What remains
+> before a real 0.1.9 turn completes is **WP-5** — the idle state machine still
+> tracks `parent_idle` + `active_subagent_ids` from 0.1.1, and
+> `TrajectoryStateUpdate.error` and `STATE_CANCELLED` are unhandled.
+
+**Landed in #9 beyond WP-1/WP-2:** the handshake read with replayed history
+exposed as `LocalConnection::initial_history()`; `SessionContinuationMode` on
+the config and builder (field 19) with upstream's RESUME validation; ordered
+shutdown (close stdin → wait 3min → escalate); `StepTracker` dedup cleared on
+leaving WAITING_FOR_USER.
+
+**WP-6 remainder:** seed `Conversation` from `initial_history`; `env`
+passthrough; `DebugConfig`; `save_dir` temp default; prompt control-character
+sanitization; 127.0.0.1 connect fallback.
 
 ---
 
@@ -20,9 +32,9 @@ before starting one.
 
 | ID | What | Size | Blocked by |
 |---|---|---|---|
-| **WP-6** | **Read the handshake frame; session continuation mode; ordered shutdown.** The one that makes a real connection possible. `scripts/probe_harness.py` documents the exact wire shapes. | M | — |
+| WP-6 | Core landed. Remainder: seed `Conversation` from the replayed history, `env` passthrough, `DebugConfig`, `save_dir` default, prompt sanitization, 127.0.0.1 fallback | S | — |
 | WP-2 tail | `session_end` reply; a `callHookRequest` branch so WP-8 is exercisable; assert `clientInfo.os`/`env` on the handshake; replace the wasm in-file mock's closed Rust→Rust loop with real fixtures | S | — |
-| WP-5 | Turn lifecycle and idle state machine: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
+| **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
 | WP-4 | Model configuration public API — `ModelTarget` / `ModelEndpoint` replacing `GeminiConfig`; the wire shape is already correct, this is the type graph and the env-var routing | L | WP-1 |
 | WP-7 | Tool runner correctness: `error_message` on the wire, argument coercion, `ToolContext` wiring, media extraction | M | WP-1 |
 | WP-9 | Capability surface: MCP servers on the wire, `search_web`/`read_url_content`, custom subagents, retry config, tool-name casing | L | WP-1, WP-4 |
@@ -43,7 +55,6 @@ Twelve items, none blocking each other except where noted.
 | S13 | `policy::safe_defaults(handler)` | `policy.rs` | XS |
 | S15 | MCP builder `when`/`name` options; `allow_` → `approve_` auto-name | `policy.rs` | XS |
 | N8 | `IntoPolicies` so policy groups compose in the builder | `policy.rs`, `agent.rs` | XS |
-| C5 | `StepTracker` clears `handled_requests` on leaving WAITING — a re-asked question currently deadlocks the harness | `local.rs`, `wasm.rs` | XS |
 | C2 | A freshly connected connection reports `is_idle == true` | `local.rs`, `wasm.rs` | XS |
 | A5 | `Conversation::send` drains the previous turn into history | `conversation.rs`, `connection.rs` | M |
 | H9 | Contain an erroring `on_tool_error` hook instead of aborting the chain | `hooks.rs` | XS |
@@ -121,8 +132,8 @@ load-bearing.
 
 Recommended order:
 
-1. **WP-6** — the connection unblocker.
-2. **WP-5** — so turns terminate correctly against a real harness.
+1. ~~WP-6 core~~ — done. **WP-5** is now the blocker for a turn completing.
+2. **WP-6 remainder** — small, and it finishes session resumption.
 3. **WP-2 tail** — cheap, and makes WP-8 exercisable.
 4. **§2 (0.1.15)** as a shippable non-breaking release.
 5. **WP-4 + WP-7 + WP-9** — the capability surface.
