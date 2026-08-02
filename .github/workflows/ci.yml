@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Weekly, Monday 07:00 UTC. Upstream drift is not urgent, but three minor
+    # versions of it went unnoticed because nothing ever looked.
+    - cron: '0 7 * * 1' 
 
 env:
   CARGO_TERM_COLOR: always
@@ -62,3 +66,25 @@ jobs:
             cargo check --manifest-path "${manifest}" --all-targets
             echo "::endgroup::"
           done
+
+  # The whole reason this crate drifted three minor versions behind upstream is
+  # that nothing was watching. This job fails when a newer google-antigravity
+  # release exists than the one proto/localharness.proto was generated from, and
+  # when the generated proto no longer matches what that release actually ships.
+  upstream-drift:
+    name: Upstream drift
+    runs-on: ubuntu-latest
+    # Advisory on a pull request; a scheduled run is where it should page.
+    continue-on-error: true
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet protobuf requests
+
+      - name: Compare the pinned harness against the newest release
+        run: python3 scripts/check_upstream_drift.py
+

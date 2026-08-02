@@ -40,7 +40,7 @@ sanitization; 127.0.0.1 connect fallback.
 | WP-9 | Capability surface: MCP servers on the wire, `search_web`/`read_url_content`, custom subagents, retry config, tool-name casing | L | WP-1, WP-4 |
 | WP-8 | Harness-side hook channel: `LifecycleHook`, `CallHookRequest`/`Response`, the router, `enabled_hooks`. Largest single item; contains the `Hook` trait break | XL | WP-1, WP-5, WP-6 |
 | WP-10 | Public API surface: multimodal prompts, slash commands, `Connection` trait changes, trigger narrowing | L | WP-5, WP-6, WP-8 |
-| WP-11 | Tooling, CI, docs, examples, skills; the upstream-drift detection job | M | — |
+| WP-11 | Tooling, CI, docs, examples, skills — **the drift job landed**; the rest has been kept current batch by batch | M | — |
 
 **WP-3** (security hardening) is complete — it landed as WI-1…WI-8 in #8.
 
@@ -220,7 +220,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | E4 | Hook proto + router | H2 — `CallHookRequest`/`Response`, the 7-entry table, always-answer guarantee | L |
 | E5 | Turn on `enabled_hooks` | Emit field 16; reduce the confirmation arm to an unconditional accept | S |
 | E6 | Public API surface | WP-10: multimodal prompts, slash commands, `Connection` trait | L |
-| E7 | Docs, examples, drift job | WP-11 | M |
+| E7 | Docs, examples, drift job — **the drift job is done** (`scripts/check_upstream_drift.py`, weekly + advisory on PRs, verified against the live 0.1.9 release). Docs and examples have been updated batch by batch alongside the code | WP-11 | M |
 
 > **E5 must be last in Phase E.** Emitting `enabled_hooks` before the router
 > exists converts a silent no-op into a mid-turn deadlock: the harness blocks
