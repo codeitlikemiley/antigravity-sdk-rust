@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.2.0
+## 0.2.0 — unreleased
+
+Not yet published to crates.io. Publishing waits on one full turn against a
+live 0.1.9 harness, which needs credentials; the release is triggered by
+pushing a `v*` tag, so merging this does not publish it.
 
 Migrates the wire format from upstream 0.1.1 to **0.1.9** and clears the defect
 backlog recorded in `docs/upstream-parity.md` and
