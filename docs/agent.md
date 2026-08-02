@@ -114,7 +114,7 @@ let config = AgentConfig::default();
 | `capabilities` | `CapabilitiesConfig` | Tool enable/disable lists, compaction threshold, image model override, finish tool schema. |
 | `system_instructions` | `Option<SystemInstructions>` | Either `Custom` (full text override) or `Appended` (sections added to default identity). |
 | `save_dir` | `Option<String>` | Directory for persisting session state/logs. |
-| `workspaces` | `Option<Vec<String>>` | Working directories the agent may access. Defaults to `cwd` if `None`. Used by `workspace_only` policies. |
+| `workspaces` | `Option<Vec<String>>` | Working directories the agent may access. Defaults to `[cwd]` when `None`. Sent to the harness *and* used by the `workspace_only` policies, so both halves scope the same directories. Pass `vec![]` to opt out of workspace scoping entirely. |
 | `skills_paths` | `Vec<String>` | Paths to folders containing custom skill modules. |
 | `policies` | `Option<Vec<Policy>>` | Safety policies controlling tool execution (approve, deny, ask_user). |
 | `hooks` | `Vec<Arc<dyn DynHook>>` | Lifecycle hooks — observe/intercept session start, tool calls, turns, errors, etc. |
