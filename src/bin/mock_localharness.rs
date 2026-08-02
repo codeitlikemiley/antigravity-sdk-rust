@@ -55,6 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout.write_all(&output_buf).await?;
     stdout.flush().await?;
 
+    // Exit on stdin EOF, which is how `disconnect()` asks the harness to shut
+    // down (the real one monitors stdin for the same reason). Without this the
+    // mock outlived every test by the client's full 3-minute process-wait
+    // timeout — the integration suite took six minutes, almost all of it spent
+    // waiting for a process that was never going to exit on its own.
+    tokio::spawn(async move {
+        let mut sink = Vec::new();
+        let _ = stdin.read_to_end(&mut sink).await;
+        std::process::exit(0);
+    });
+
     // 4. Accept a TCP connection and upgrade to WebSocket
     let (stream, _) = listener.accept().await?;
     let ws_stream = accept_async(stream).await?;
@@ -64,6 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_lines)] // one branch per scripted scenario; splitting
+// them would scatter the wire format across helpers for no gain
 async fn handle_ws_connection(
     mut ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     client_lang: &str,
@@ -73,6 +86,23 @@ async fn handle_ws_connection(
     if let Some(msg_res) = ws_stream.next().await {
         let _ = msg_res?;
     }
+
+    // Answer the handshake. Since 0.1.4 this is the harness's mandatory first
+    // frame, and upstream's client blocks on it before doing anything else
+    // (local_connection.py:1162-1176). The SDK does not read it yet — that is
+    // WP-6 — but the mock must send it, or it will keep certifying a handshake
+    // no real harness performs.
+    let init_response = serde_json::json!({
+        "initializeConversationResponse": {
+            "cascadeId": "test_traj",
+            "history": []
+        },
+        "seqNum": "1",
+        "timestampMicros": "1"
+    });
+    ws_stream
+        .send(WsMessage::Text(init_response.to_string()))
+        .await?;
 
     // Read client user prompt message
     let mut prompt = String::new();
@@ -94,14 +124,210 @@ async fn handle_ws_connection(
         .send(WsMessage::Text(traj_running.to_string()))
         .await?;
 
-    if prompt.contains("trigger_terminal_error") {
+    if let Some(path) = prompt
+        .split("trigger_tool_confirmation:")
+        .nth(1)
+        .map(|rest| rest.trim_end_matches(['"', '}', ' ']).to_string())
+    {
+        // Drive a real pre-tool gate: a VIEW_FILE the harness wants confirmed.
+        // The SDK answers with ToolConfirmation{accepted}, which is the policy
+        // layer's decision observed from the outside — the only way to prove
+        // the enforcer is actually registered and consulted at runtime.
+        //
+        // STATE_WAITING_FOR_USER matters: the client only treats a confirmation
+        // request as new while the step is in that state.
+        let step_confirm = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "Requesting confirmation",
+                "state": "STATE_WAITING_FOR_USER",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "viewFile": { "filePath": path },
+                "toolConfirmationRequest": {}
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(step_confirm.to_string()))
+            .await?;
+
+        // Wait for the client's decision and report it back in the turn's text,
+        // so a test can assert on it without reaching into the SDK.
+        let mut accepted = "none".to_string();
+        while let Some(msg_res) = ws_stream.next().await {
+            let WsMessage::Text(text) = msg_res? else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(confirmation) = value.get("toolConfirmation") {
+                accepted = confirmation
+                    .get("accepted")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    .to_string();
+                break;
+            }
+        }
+
+        let step_done = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 2,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": format!("accepted={accepted}"),
+                "textDelta": format!("accepted={accepted}"),
+                "state": "STATE_DONE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "finish": { "outputString": "\"done\"" }
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(step_done.to_string()))
+            .await?;
+    } else if prompt.contains("trigger_hook_request") {
+        // The real harness blocks its turn here. If the client never answers,
+        // this branch stalls and the test times out — which is exactly the
+        // failure the router exists to prevent.
+        let hook_request = serde_json::json!({
+            "callHookRequest": {
+                "requestId": "hook-1",
+                "name": "pre_tool",
+                "type": "LIFECYCLE_HOOK_PRE_TOOL",
+                "preToolArgs": {
+                    "toolName": "RUN_COMMAND",
+                    "argumentsJson": "{\"command_line\":\"rm -rf /\"}"
+                }
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(hook_request.to_string()))
+            .await?;
+
+        let mut decision = "none".to_string();
+        while let Some(msg_res) = ws_stream.next().await {
+            let WsMessage::Text(text) = msg_res? else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(response) = value.get("callHookResponse") {
+                decision = response
+                    .get("preToolResult")
+                    .and_then(|r| r.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("missing")
+                    .to_string();
+                break;
+            }
+        }
+
+        let step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": format!("hook decision={decision}"),
+                "textDelta": format!("hook decision={decision}"),
+                "state": "STATE_DONE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "finish": { "outputString": "\"done\"" }
+            }
+        });
+        ws_stream.send(WsMessage::Text(step.to_string())).await?;
+    } else if prompt.contains("trigger_subagent") {
+        // Upstream's subagent fixture: a main-trajectory step establishes the
+        // main trajectory, a step on a second trajectory carries the subagent's
+        // output, and that trajectory going idle is how the START_SUBAGENT call
+        // completes — there is no tool response for it.
+        let main_step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "delegating",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(main_step.to_string()))
+            .await?;
+
+        let sub_step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "sub_traj",
+                "text": "Here is a poem about nature.",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(sub_step.to_string()))
+            .await?;
+
+        let sub_idle = serde_json::json!({
+            "trajectoryStateUpdate": {
+                "trajectoryId": "sub_traj",
+                "state": "STATE_FULLY_IDLE"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(sub_idle.to_string()))
+            .await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    } else if prompt.contains("trigger_crash") {
+        // Die mid-turn the way a real crash does: something on stderr, then the
+        // socket drops with no idle transition. The sleep gives the client's
+        // stderr reader time to see the line before the socket closes; the two
+        // arrive on different channels and are not ordered against each other.
+        eprintln!("panic: mock harness exploded");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::process::exit(101);
+    } else if prompt.contains("trigger_cancel") {
+        // Emit one step, then stall until the client halts. The real harness
+        // answers a halt with an ordinary STATE_FULLY_IDLE — it does *not* send
+        // STATE_CANCELLED — which is exactly the case the client-side flag
+        // exists to disambiguate. Waiting for the frame rather than sleeping
+        // keeps the test deterministic.
+        let step1 = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "Working...",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream.send(WsMessage::Text(step1.to_string())).await?;
+
+        while let Some(msg_res) = ws_stream.next().await {
+            match msg_res? {
+                WsMessage::Text(text) if text.contains("haltRequest") => break,
+                WsMessage::Close(_) => break,
+                _ => {}
+            }
+        }
+    } else if prompt.contains("trigger_terminal_error") {
         let step_terminal = serde_json::json!({
             "stepUpdate": {
                 "stepIndex": 1,
                 "cascadeId": "test_traj",
                 "trajectoryId": "test_traj",
                 "text": "Terminal error triggered",
-                "state": "STATE_TERMINAL_ERROR",
+                "state": "STATE_ERROR",
                 "source": "SOURCE_MODEL",
                 "target": "TARGET_USER",
                 "errorMessage": "Terminal error triggered by prompt"
@@ -150,15 +376,27 @@ async fn handle_ws_connection(
     let traj_idle = serde_json::json!({
         "trajectoryStateUpdate": {
             "trajectoryId": "test_traj",
-            "state": "STATE_IDLE"
+            // Renamed from STATE_IDLE upstream in 0.1.9. The numeric value is
+            // still 2, but protojson matches on the value NAME, so the old
+            // spelling is dropped as an unknown variant and the turn never ends.
+            "state": "STATE_FULLY_IDLE"
         }
     });
     ws_stream
         .send(WsMessage::Text(traj_idle.to_string()))
         .await?;
 
-    // Keep reading until client disconnects or we get terminated
+    // Keep reading until client disconnects or we get terminated. A
+    // sessionEndRequest must be answered: the client waits for the acknowledgement
+    // before tearing the process down, exactly as it does against a real harness.
     while let Some(msg_res) = ws_stream.next().await {
+        if let Ok(WsMessage::Text(ref text)) = msg_res
+            && text.contains("sessionEndRequest")
+        {
+            let ack = serde_json::json!({ "sessionEndResponse": true });
+            let _ = ws_stream.send(WsMessage::Text(ack.to_string())).await;
+            continue;
+        }
         if msg_res.is_err() {
             break;
         }

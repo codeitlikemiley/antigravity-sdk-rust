@@ -68,6 +68,35 @@ impl Conversation {
         }
     }
 
+    /// Pre-populates history with steps the harness replayed when the session
+    /// was resumed.
+    ///
+    /// Called once by `Agent::start`, before any turn. Turn boundaries are
+    /// recovered from the steps themselves — each one sourced from the user
+    /// opens a turn — so [`turn_count`](Self::turn_count) and
+    /// [`last_response`](Self::last_response) describe the resumed session
+    /// rather than an empty one. Without this a resumed conversation looked
+    /// brand new to the caller even though the harness had its full history.
+    ///
+    /// A no-op if history is already non-empty, so it cannot clobber a live
+    /// session.
+    pub async fn seed_history(&self, steps: Vec<Step>) {
+        if steps.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        if !state.steps.is_empty() {
+            return;
+        }
+        state.turn_start_indices = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.source == crate::types::StepSource::User)
+            .map(|(i, _)| i)
+            .collect();
+        state.steps = steps;
+    }
+
     /// Returns the underlying [`Connection`].
     pub fn connection(&self) -> AnyConnection {
         self.conn.clone()
@@ -81,6 +110,13 @@ impl Conversation {
     /// Returns whether the connection is currently idle.
     pub fn is_idle(&self) -> bool {
         self.conn.is_idle()
+    }
+
+    /// Resolves once the turn in flight has finished.
+    ///
+    /// Returns immediately if none is running.
+    pub async fn wait_for_idle(&self) {
+        self.conn.wait_for_idle().await;
     }
 
     /// Retrieves a copy of the current conversation history steps.
@@ -134,21 +170,80 @@ impl Conversation {
 
     /// Sends a text prompt to the connection and registers the turn start boundary.
     ///
+    /// Any steps still queued from the previous turn are drained into history
+    /// first.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying connection fails to transmit the prompt.
     pub async fn send(&self, prompt: &str) -> Result<(), anyhow::Error> {
-        // If not idle, wait for it
-        if !self.conn.is_idle() {
-            // Note: Unlike Python's runtime RuntimeError handling, in Rust we can just wait
-            // or let the stream run-loop handle it.
+        // Drain whatever is left of the previous turn into history before
+        // starting a new one (upstream `conversation.py:125-134`). A caller who
+        // stopped reading mid-turn used to lose those steps entirely, and the
+        // next turn's boundary was recorded at the wrong index.
+        //
+        // If another consumer holds the step stream, `receive_steps()` yields a
+        // single error and this ends immediately rather than fighting it.
+        //
+        // Only after a turn has actually been sent: a fresh connection reports
+        // not-idle until the harness says otherwise, and draining there would
+        // block forever on a stream with nothing to deliver.
+        let turn_in_flight = !self.state.lock().await.turn_start_indices.is_empty();
+        if turn_in_flight && !self.conn.is_idle() {
+            let mut leftovers = self.receive_steps();
+            while leftovers.next().await.is_some() {}
         }
+
         let mut state = self.state.lock().await;
         let len = state.steps.len();
         state.turn_start_indices.push(len);
         state.turn_usage = None;
         drop(state);
         self.conn.send(prompt).await
+    }
+
+    /// Sends a multimodal prompt — text, attachments, slash commands.
+    ///
+    /// The same turn bookkeeping as [`send`](Self::send), including the drain
+    /// of the previous turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt is empty, or if the connection fails.
+    pub async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        if content.is_empty() {
+            return Err(anyhow::anyhow!(
+                "the prompt is empty; an empty prompt is rejected before it reaches the harness"
+            ));
+        }
+
+        let turn_in_flight = !self.state.lock().await.turn_start_indices.is_empty();
+        if turn_in_flight && !self.conn.is_idle() {
+            let mut leftovers = self.receive_steps();
+            while leftovers.next().await.is_some() {}
+        }
+
+        let mut state = self.state.lock().await;
+        let len = state.steps.len();
+        state.turn_start_indices.push(len);
+        state.turn_usage = None;
+        drop(state);
+        self.conn.send_content(content).await
+    }
+
+    /// The structured output of the most recent `FINISH`, if there was one.
+    ///
+    /// This is what a `response_schema` produces. Reaching it previously meant
+    /// walking `history()` backwards looking for the right step type.
+    pub async fn last_structured_output(&self) -> Option<serde_json::Value> {
+        let state = self.state.lock().await;
+        let found = state
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| step.structured_output.clone());
+        drop(state);
+        found
     }
 
     /// Subscribes to step updates from the connection, inserting them into history and enforcing history limits.
@@ -289,7 +384,26 @@ impl Conversation {
     ///
     /// Returns an error if sending the prompt or receiving chunk responses fails.
     pub async fn chat_to_completion(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
-        let mut chunks = self.chat(prompt).await?;
+        self.send(prompt).await?;
+        self.collect_turn().await
+    }
+
+    /// Sends a multimodal prompt and collects the whole reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt is empty or the connection fails.
+    pub async fn chat_content_to_completion(
+        &self,
+        content: &crate::types::Content,
+    ) -> Result<ChatResponse, anyhow::Error> {
+        self.send_content(content).await?;
+        self.collect_turn().await
+    }
+
+    /// Drains the turn in flight into a [`ChatResponse`].
+    async fn collect_turn(&self) -> Result<ChatResponse, anyhow::Error> {
+        let mut chunks = self.receive_chunks();
         let mut text = String::new();
         let mut thinking = String::new();
         while let Some(chunk_res) = chunks.next().await {
@@ -303,14 +417,45 @@ impl Conversation {
                 StreamChunk::ToolCall(_) => {}
             }
         }
-        let steps = self.history().await;
-        let usage_metadata = self.total_usage().await;
+        // Steps for THIS turn, not the whole session. `history()` returns
+        // everything, so a long conversation returned the entire transcript on
+        // every reply -- growing without bound and making the field useless for
+        // "what just happened". turn_start_indices is already tracked for this.
+        let steps = {
+            let state = self.state.lock().await;
+            let start = state.turn_start_indices.last().copied().unwrap_or(0);
+            state
+                .steps
+                .get(start..)
+                .map(<[Step]>::to_vec)
+                .unwrap_or_default()
+        };
+        let usage_metadata = self.last_turn_usage().await;
         Ok(ChatResponse {
             text,
             thinking,
             steps,
             usage_metadata,
         })
+    }
+
+    /// Halts the turn in flight.
+    ///
+    /// The harness stops the trajectory and reports ordinary idle, so the
+    /// connection marks the turn as caller-cancelled: the in-flight
+    /// `receive_steps()` stream yields
+    /// [`AntigravityError::Cancelled`](crate::error::AntigravityError::Cancelled)
+    /// before it ends, which is what distinguishes a halted turn from one that
+    /// simply finished.
+    ///
+    /// Cancelling when no turn is running is harmless — the flag is cleared by
+    /// the next [`send`](Self::send).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the halt request cannot be transmitted.
+    pub async fn cancel(&self) -> Result<(), anyhow::Error> {
+        self.conn.send_halt_request().await
     }
 
     /// Gracefully closes the underlying connection.
@@ -356,6 +501,94 @@ mod tests {
         assert!(conv.is_idle());
         assert_eq!(conv.history().await.len(), 0);
         assert_eq!(conv.turn_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn seed_history_recovers_turn_boundaries() {
+        let (_conn, conv) = test_setup("conv-123", Some(10));
+        let replayed = vec![
+            Step {
+                source: StepSource::User,
+                content: "first question".to_string(),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::Model,
+                content: "first answer".to_string(),
+                is_complete_response: Some(true),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::User,
+                content: "second question".to_string(),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::Model,
+                content: "second answer".to_string(),
+                is_complete_response: Some(true),
+                ..Default::default()
+            },
+        ];
+        conv.seed_history(replayed).await;
+
+        assert_eq!(conv.history().await.len(), 4);
+        // Two user prompts in the replay: the resumed session is two turns in,
+        // not zero.
+        assert_eq!(conv.turn_count().await, 2);
+        assert_eq!(conv.last_response().await, "second answer");
+    }
+
+    /// Seeding must never overwrite a session that has already said something.
+    #[tokio::test]
+    async fn seed_history_leaves_a_live_session_alone() {
+        let (_conn, conv) = test_setup("conv-123", Some(10));
+        conv.seed_history(vec![Step {
+            source: StepSource::User,
+            content: "resumed".to_string(),
+            ..Default::default()
+        }])
+        .await;
+        conv.seed_history(vec![Step {
+            source: StepSource::User,
+            content: "clobber".to_string(),
+            ..Default::default()
+        }])
+        .await;
+
+        let history = conv.history().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "resumed");
+    }
+
+    /// A caller who stops reading mid-turn used to lose those steps entirely,
+    /// and the next turn's boundary was recorded at the wrong index.
+    #[tokio::test]
+    async fn send_drains_the_previous_turn_into_history() {
+        let (conn, conv) = test_setup("conv-123", Some(100));
+        conn.set_steps(vec![
+            Step {
+                content: "first".to_string(),
+                ..Default::default()
+            },
+            Step {
+                content: "second".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        conv.send("one").await.unwrap();
+        assert_eq!(conv.history().await.len(), 0, "nothing read yet");
+
+        // Second send drains what the caller never read.
+        conn.set_idle(false);
+        conv.send("two").await.unwrap();
+
+        let history = conv.history().await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(conv.turn_count().await, 2);
+        // The second turn starts after the drained steps, not on top of them.
+        assert_eq!(conv.compaction_indices().await.len(), 0);
     }
 
     #[tokio::test]
@@ -522,6 +755,7 @@ mod tests {
             name: "tool_1".to_string(),
             args: serde_json::Value::Null,
             canonical_path: None,
+            server_name: None,
         };
         let step = Step {
             id: "1".to_string(),
@@ -554,6 +788,7 @@ mod tests {
             name: "tool_1".to_string(),
             args: serde_json::Value::Null,
             canonical_path: None,
+            server_name: None,
         };
         let step = Step {
             id: "1".to_string(),

@@ -4,7 +4,11 @@
 
 set -euo pipefail
 
-VERSION="0.1.1"
+# Must match PINNED_VERSION in scripts/check_upstream_drift.py, which enforces
+# it. The SDK speaks this version's wire format: against 0.1.1 a turn never
+# ends, because STATE_IDLE was renamed STATE_FULLY_IDLE in 0.1.9 and protojson
+# drops the unknown variant.
+VERSION="0.1.9"
 PLATFORM=""
 ARCH="$(uname -m)"
 OS="$(uname -s)"

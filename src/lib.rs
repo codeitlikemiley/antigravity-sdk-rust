@@ -60,10 +60,13 @@ pub mod proto {
 }
 
 pub mod agent;
+pub mod coerce;
 pub mod connection;
 pub mod context;
 pub mod conversation;
 pub mod error;
+pub mod harness_config;
+pub mod hook_dispatch;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
@@ -72,8 +75,11 @@ pub mod wasm;
 
 pub mod path_safety;
 pub mod policy;
+pub mod state;
 pub mod step_extract;
 pub mod tool_context;
+pub mod tool_output;
+pub mod tool_wire;
 pub mod tools;
 pub mod trigger_helpers;
 pub mod triggers;

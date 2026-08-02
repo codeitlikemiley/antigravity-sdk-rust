@@ -3,6 +3,15 @@
 //! This module provides a WebSocket-based harness connection for WebAssembly environments,
 //! connecting to the host `localharness` process over the network.
 
+/// How long `initial_history()` waits for the harness handshake reply.
+///
+/// A pre-0.1.4 harness never answers; the wait then expires and the session
+/// starts with no replayed history, which is correct for one.
+const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+
+/// How long `disconnect()` waits for the harness to acknowledge session end.
+const SESSION_END_TIMEOUT_SECONDS: u64 = 10;
+
 use anyhow::{Result, anyhow};
 use futures_util::stream::{self, BoxStream, StreamExt};
 use serde_json::Value;
@@ -23,10 +32,10 @@ use tungstenite::{Message as WsMessage, client::client, handshake::client::Reque
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
-    FileEditToolConfig, FilesystemWorkspace, FindToolConfig, GeminiConfig as ProtoGeminiConfig,
-    GenerateImageToolConfig, GrepSearchToolConfig, HarnessConfig, HarnessSideTools,
-    InitializeConversationEvent, InputEvent, ListDirToolConfig, MultipleChoiceAnswer, OutputEvent,
-    RunCommandToolConfig, StepUpdate, SubagentsConfig,
+    FileEditToolConfig, FilesystemWorkspace, FindToolConfig, GenerateImageToolConfig,
+    GrepSearchToolConfig, HarnessConfig, HarnessSideTools, InitializeConversationEvent, InputEvent,
+    ListDirToolConfig, MultipleChoiceAnswer, OutputEvent, ReadUrlContentToolConfig,
+    RunCommandToolConfig, SearchWebToolConfig, StepUpdate, SubagentsConfig,
     SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
     ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
     ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
@@ -52,7 +61,13 @@ impl StepTracker {
         Self::default()
     }
 
-    pub const fn update_state(&mut self, state: i32) {
+    pub fn update_state(&mut self, state: i32) {
+        // Leaving WAITING_FOR_USER ends the request round. Without this the
+        // dedup set persists, so a re-asked question is never answered a second
+        // time and the harness waits forever. STATE_WAITING_FOR_USER = 3.
+        if self.state == 3 && state != 3 {
+            self.handled_requests.clear();
+        }
         self.state = state;
     }
 
@@ -81,6 +96,14 @@ pub struct WasmConnectionStrategy {
     pub tool_runner: Option<ToolRunner>,
     pub hook_runner: Option<HookRunner>,
     pub conversation_id: String,
+    /// MCP server configurations, emitted on `HarnessConfig.mcp_servers`.
+    pub mcp_servers: Vec<crate::types::McpServerConfig>,
+    /// How the harness retries the model, on `HarnessConfig.retry_config`.
+    pub retry_config: Option<crate::types::RetryConfig>,
+    /// Tool-output truncation policy, on `HarnessConfig.tool_output_truncation`.
+    pub tool_output_truncation: Option<crate::types::ToolOutputTruncation>,
+    /// Named subagents, emitted on `HarnessConfig.custom_subagents`.
+    pub subagents: Vec<crate::types::SubagentConfig>,
 }
 
 impl WasmConnectionStrategy {
@@ -145,15 +168,25 @@ impl WasmConnectionStrategy {
         ws.get_ref().set_nonblocking(true)?;
 
         // Build HarnessConfig proto
+        let declared_hook_kinds = match self.hook_runner {
+            Some(ref runner) => runner.declared_kinds().await,
+            None => crate::hook_dispatch::HookKinds::NONE,
+        };
+
         let mut proto_tools = Vec::new();
+        let mut registered_tool_names: Vec<String> = Vec::new();
         if let Some(ref runner) = self.tool_runner {
             let tools = runner.tools.read().await;
-            for t in tools.values() {
+            for t in tools.iter() {
+                registered_tool_names.push(t.name().to_string());
                 proto_tools.push(ProtoTool {
                     name: Some(t.name().to_string()),
                     description: Some(t.description().to_string()),
                     parameters_json_schema: Some(t.parameters_json_schema().to_string()),
                     response_json_schema: None,
+                    // Deferred tool loading is a 0.1.9 capability this crate
+                    // does not use yet (audit W27).
+                    defer_loading: None,
                 });
             }
         }
@@ -198,29 +231,6 @@ impl WasmConnectionStrategy {
             }
         });
 
-        let proto_gemini = ProtoGeminiConfig {
-            api_key: Some(api_key),
-            base_url: None,
-            model_name: Some(self.gemini_config.models.default.name.clone()),
-            thinking_level: self
-                .gemini_config
-                .models
-                .default
-                .generation
-                .thinking_level
-                .map(|l| match l {
-                    crate::types::ThinkingLevel::Minimal => "minimal".to_string(),
-                    crate::types::ThinkingLevel::Low => "low".to_string(),
-                    crate::types::ThinkingLevel::Medium => "medium".to_string(),
-                    crate::types::ThinkingLevel::High => "high".to_string(),
-                }),
-            enable_url_context: self.gemini_config.enable_url_context,
-            enable_google_search: self.gemini_config.enable_google_search,
-            use_vertex: Some(self.gemini_config.vertex),
-            project: self.gemini_config.project.clone(),
-            location: self.gemini_config.location.clone(),
-        };
-
         let mut proto_workspaces = Vec::new();
         for w in &self.workspaces {
             proto_workspaces.push(ProtoWorkspace {
@@ -263,6 +273,16 @@ impl WasmConnectionStrategy {
             );
 
         let side_tools = HarnessSideTools {
+            // A tool like any other: absent would leave the harness to guess,
+            // and a caller who listed `enabled_tools` had no way to turn either
+            // on or off (C6).
+            search_web: Some(SearchWebToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::SearchWeb)),
+            }),
+            read_url_content: Some(ReadUrlContentToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::ReadUrlContent)),
+            }),
+            tool_search_config: None,
             find: Some(FindToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::FindFile)),
             }),
@@ -273,7 +293,10 @@ impl WasmConnectionStrategy {
                 enabled: Some(active_tools.contains(&BuiltinTools::StartSubagent)),
             }),
             user_questions: Some(UserQuestionsConfig {
-                enabled: Some(true),
+                // Was hardcoded true, so a caller who listed `enabled_tools`
+                // explicitly still got the question panel and no way to turn it
+                // off. It is a tool like any other.
+                enabled: Some(active_tools.contains(&BuiltinTools::AskQuestion)),
             }),
             file_edit: Some(FileEditToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::EditFile)),
@@ -293,15 +316,36 @@ impl WasmConnectionStrategy {
             permissions: None,
             generate_image: Some(GenerateImageToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::GenerateImage)),
-                model_name: self.capabilities_config.image_model.clone(),
             }),
         };
 
         let harness_config = HarnessConfig {
             cascade_id: Some(self.conversation_id.clone()),
-            model_config: Some(
-                crate::proto::localharness::harness_config::ModelConfig::GeminiConfig(proto_gemini),
+            // Each of these is its own work package (WP-6 session continuation
+            // and retry, WP-8 hooks, WP-9 MCP and subagents). Explicitly unset
+            // so `cargo build` flags them again when those land.
+            session_continuation_mode: None,
+            retry_config: crate::harness_config::build_retry_config_proto(
+                self.retry_config.as_ref(),
             ),
+            // Only what a registered hook declared. The harness blocks its
+            // turn waiting for a CallHookResponse for every kind named here,
+            // and `answer_hook_request` is what makes that safe — emitting this
+            // before the router existed would have turned a silent no-op into a
+            // mid-turn deadlock (E5).
+            enabled_hooks: declared_hook_kinds.to_proto(),
+            custom_subagents: crate::harness_config::build_custom_subagents_proto(
+                &self.subagents,
+                &registered_tool_names,
+            )?,
+            mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
+            tool_output_truncation: crate::harness_config::build_truncation_proto(
+                self.tool_output_truncation.as_ref(),
+            ),
+            models: crate::harness_config::build_models_proto(
+                &self.gemini_config,
+                self.capabilities_config.image_model.as_deref(),
+            )?,
             system_instructions: proto_sys,
             tools: proto_tools,
             harness_side_tools: Some(side_tools),
@@ -347,18 +391,46 @@ impl WasmConnectionStrategy {
         });
 
         // Setup channels for step stream
-        let (step_tx, step_rx) = mpsc::unbounded_channel::<Result<Step, anyhow::Error>>();
+        let (step_tx, step_rx) = mpsc::unbounded_channel::<crate::step_extract::StepEvent>();
         let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
-        let is_idle = Arc::new(AtomicBool::new(false));
-        let parent_idle = Arc::new(Mutex::new(false));
-        let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));
+        // Upstream starts idle (local_connection.py:448-459) and this now
+        // matches. Two earlier attempts were reverted: the first hit a
+        // first-poll hazard the receive_steps() loop restructure removed, the
+        // second a connect-time race where a caller polling receive_steps()
+        // before the harness reported STATE_RUNNING saw idle with an empty
+        // queue and got an empty stream.
+        //
+        // What closes it is the contract, not a flag: `send()` clears idle
+        // before the prompt goes out, so send()-then-receive — which is what
+        // `chat()` and `Conversation` do — can never observe the gap. A caller
+        // that subscribes before sending anything now gets an empty stream
+        // immediately instead of blocking forever on a turn that was never
+        // started, which is the better of the two failure modes and the one
+        // upstream has (C2).
+        let is_idle = Arc::new(AtomicBool::new(true));
+        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
+        let (session_end_tx, _session_end_rx) = tokio::sync::watch::channel(false);
+        let conn_session_end = session_end_tx.clone();
+        let socket_closed = Arc::new(AtomicBool::new(false));
+        let conn_socket_closed = socket_closed.clone();
+        let (initial_history_tx, _initial_history_rx) =
+            tokio::sync::watch::channel::<Option<Vec<Step>>>(None);
+        let conn_initial_history = initial_history_tx.clone();
+        let conn_idle_tx = idle_tx.clone();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
+        // Last model text seen on each subagent trajectory, so the
+        // `post_tool_call` that fires when the subagent finishes can carry what
+        // it produced (upstream `_subagent_responses`).
+        let subagent_responses: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let conn_subagent_responses = subagent_responses.clone();
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
-        let conn_parent_idle = parent_idle.clone();
-        let conn_active_subagents = active_subagent_ids.clone();
+        let conn_is_idle_for_close = is_idle.clone();
+        let conn_cancel_requested = cancel_requested.clone();
         let conn_step_trackers = step_trackers.clone();
 
         let tool_runner = self.tool_runner.clone();
@@ -392,17 +464,38 @@ impl WasmConnectionStrategy {
                                             let step_idx = step_update.step_index.unwrap_or(0);
                                             let key = (traj_id.clone(), step_idx);
 
-                                            // Learn the cascade_id from the first StepUpdate
-                                            // where cascade_id == trajectory_id (Python parity)
+                                            // The main trajectory is whichever one reports first,
+                                            // unconditionally — upstream event_processor.py:478-480.
+                                            // The previous rule also required cascade_id ==
+                                            // trajectory_id, so on a resumed session, or when a
+                                            // subagent reported first, nothing was ever learned and
+                                            // every trajectory then counted as the main one.
+                                            // (A1; the local transport got this fix first.)
+                                            if !traj_id.is_empty() {
+                                                let mut main_id = conn_cascade_id_for_ws.lock().await;
+                                                let unset = main_id.is_none();
+                                                if unset {
+                                                    *main_id = Some(traj_id.clone());
+                                                }
+                                                drop(main_id);
+                                                if unset {
+                                                    tracing::debug!("main trajectory: {traj_id}");
+                                                    let _ = conn_learned_id.set(traj_id.clone());
+                                                }
+                                            }
+
+                                            // A model step on a trajectory that is not the main one
+                                            // came from a subagent. Keep its text: the completion
+                                            // event carries no result of its own (H12).
                                             {
-                                                let cascade_id_val = step_update.cascade_id.clone().unwrap_or_default();
-                                                if !cascade_id_val.is_empty() && cascade_id_val == traj_id {
-                                                    let _ = conn_learned_id.set(cascade_id_val.clone());
-                                                    let mut cid = conn_cascade_id_for_ws.lock().await;
-                                                    if cid.is_none() {
-                                                        tracing::debug!("Learned cascade_id from StepUpdate: {}", cascade_id_val);
-                                                        *cid = Some(cascade_id_val);
-                                                    }
+                                                let main_id = conn_cascade_id_for_ws.lock().await.clone();
+                                                let is_subagent = !traj_id.is_empty()
+                                                    && main_id.as_ref().is_some_and(|id| *id != traj_id);
+                                                if is_subagent
+                                                    && step_update.source == Some(3)
+                                                    && let Some(text) = step_update.text.clone().filter(|t| !t.is_empty())
+                                                {
+                                                    conn_subagent_responses.lock().await.insert(traj_id.clone(), text);
                                                 }
                                             }
 
@@ -462,8 +555,11 @@ impl WasmConnectionStrategy {
                                                 Some(1) => StepStatus::Active,
                                                 Some(2) => StepStatus::Done,
                                                 Some(3) => StepStatus::WaitingForUser,
-                                                Some(4) => StepStatus::Error,
-                                                Some(5) => StepStatus::TerminalError,
+                                                // STATE_TERMINAL_ERROR = 5 was removed upstream in
+                                                // 0.1.3; a step that fails now reports STATE_ERROR,
+                                                // and a whole turn failing arrives as
+                                                // TrajectoryStateUpdate.error instead (audit W7/W23).
+                                                Some(4) => StepStatus::TerminalError,
                                                 _ => StepStatus::Unknown,
                                             };
 
@@ -492,7 +588,19 @@ impl WasmConnectionStrategy {
                                                 f.output_string.as_ref().and_then(|s| serde_json::from_str(s).ok())
                                             });
 
-                                            let error_msg = step_update.error_message.clone().unwrap_or_default();
+                                            // A step can carry ActionError{error_message,
+                                            // http_code} with an empty top-level message, which
+                                            // reported the failure as blank (audit C14).
+                                            let error_msg = step_update
+                                                .error_message
+                                                .clone()
+                                                .or_else(|| {
+                                                    step_update
+                                                        .error
+                                                        .as_ref()
+                                                        .and_then(|e| e.error_message.clone())
+                                                })
+                                                .unwrap_or_default();
                                             let http_code = step_update.error.as_ref().and_then(|e| e.http_code).unwrap_or(0);
 
                                             let step = Step {
@@ -516,7 +624,31 @@ impl WasmConnectionStrategy {
                                                 http_code,
                                             };
 
-                                            let _ = step_tx.send(Ok(step));
+                                            // Turn-level hooks fire off the step that carries the
+                                            // event, which is the only place either is observable
+                                            // from inside the connection (H1b, H1d).
+                                            if let Some(runner) = hook_runner.as_ref() {
+                                                if step.is_complete_response == Some(true) {
+                                                    let runner = runner.clone();
+                                                    let text = step.content.clone();
+                                                    crate::spawn_task(async move {
+                                                        if let Err(e) = runner.dispatch_post_turn(&text).await {
+                                                            tracing::error!("post_turn hook failed: {e:?}");
+                                                        }
+                                                    });
+                                                }
+                                                if step.r#type == StepType::Compaction {
+                                                    let runner = runner.clone();
+                                                    let compacted = step.clone();
+                                                    crate::spawn_task(async move {
+                                                        if let Err(e) = runner.dispatch_on_compaction(&compacted).await {
+                                                            tracing::error!("on_compaction hook failed: {e:?}");
+                                                        }
+                                                    });
+                                                }
+                                            }
+
+                                            let _ = step_tx.send(crate::step_extract::StepEvent::Step(Box::new(step)));
 
                                             // Detect platform-level errors (source=SYSTEM) and propagate them.
                                             if source == StepSource::System
@@ -524,7 +656,7 @@ impl WasmConnectionStrategy {
                                                 && (http_code == 400 || http_code == 401 || http_code == 403)
                                             {
                                                 let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
-                                                let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
                                                 break;
                                             }
 
@@ -532,7 +664,7 @@ impl WasmConnectionStrategy {
                                             if status == StepStatus::TerminalError {
                                                 let err_msg = step_update.error_message.clone()
                                                     .unwrap_or_else(|| "Terminal error occurred during execution".to_string());
-                                                let _ = step_tx.send(Err(
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Error(
                                                     AntigravityExecutionError { message: err_msg }.into()
                                                 ));
                                                 break;
@@ -548,8 +680,16 @@ impl WasmConnectionStrategy {
                                                         let tr = ToolResult {
                                                             name: tc.name.clone(),
                                                             id: Some(tc.id.clone()),
-                                                            result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(Value::String)),
+                                                            // Structured per tool, so a hook can read an
+                                                            // exit code or a content path instead of
+                                                            // parsing display text (N3). Falls back to
+                                                            // the text for anything unrecognised.
+                                                            result: crate::tool_output::structured_result(&step_update)
+                                                                .or_else(|| extracted.and_then(|r| r.result))
+                                                                .or_else(|| step_update.text.clone().map(Value::String)),
                                                             error: None,
+                                                            server_name: None,
+                                                            exception: None,
                                                         };
                                                         let runner_clone = runner.clone();
                                                         crate::spawn_task(async move {
@@ -560,7 +700,7 @@ impl WasmConnectionStrategy {
                                                         let err = anyhow!(err_msg);
                                                         let runner_clone = runner.clone();
                                                         crate::spawn_task(async move {
-                                                            let _ = runner_clone.dispatch_on_tool_error(&err).await;
+                                                            runner_clone.dispatch_on_tool_error(&err).await;
                                                         });
                                                     }
                                                 }
@@ -574,7 +714,15 @@ impl WasmConnectionStrategy {
                                                 let step_index = step_update.step_index;
                                                 crate::spawn_task(async move {
                                                     let mut questions_list = Vec::new();
-                                                    for uq in &q_req_clone.questions {
+                                                    // The hook only sees multiple-choice questions,
+                                                    // so the response index is an index into the
+                                                    // FILTERED list. Carry the original index or
+                                                    // every answer after a non-multiple-choice
+                                                    // question is recorded against the wrong one.
+                                                    let mut original_indices: Vec<usize> = Vec::new();
+                                                    for (original_index, uq) in
+                                                        q_req_clone.questions.iter().enumerate()
+                                                    {
                                                         if let Some(crate::proto::localharness::user_question::QuestionType::MultipleChoice(ref mc)) = uq.question_type {
                                                             let mut opts = Vec::new();
                                                             for (j, choice) in mc.choices.iter().enumerate() {
@@ -583,6 +731,7 @@ impl WasmConnectionStrategy {
                                                                     text: choice.clone(),
                                                                 });
                                                             }
+                                                            original_indices.push(original_index);
                                                             questions_list.push(AskQuestionEntry {
                                                                 question: mc.question.clone().unwrap_or_default(),
                                                                 options: opts,
@@ -601,7 +750,17 @@ impl WasmConnectionStrategy {
                                                     if let Some(runner) = hook_runner.as_ref().filter(|_| !questions_list.is_empty()) {
                                                         let res = runner.dispatch_interaction(&questions_list).await;
                                                         if let Ok(Some(q_res)) = res {
-                                                            for (orig_idx, r) in q_res.responses.iter().enumerate() {
+                                                            for (filtered_idx, r) in
+                                                                q_res.responses.iter().enumerate()
+                                                            {
+                                                                // A hook may return more responses
+                                                                // than there were questions; ignore
+                                                                // the extras rather than panicking.
+                                                                let Some(&orig_idx) =
+                                                                    original_indices.get(filtered_idx)
+                                                                else {
+                                                                    break;
+                                                                };
                                                                 if !r.skipped {
                                                                     let mut mc_ans = MultipleChoiceAnswer {
                                                                         selected_choice_indices: Vec::new(),
@@ -647,12 +806,8 @@ impl WasmConnectionStrategy {
                                                     let mut allow = true;
                                                     let tool_call = crate::step_extract::extract_builtin_tool_call(&step_update_clone);
                                                     if let Some(ref tc) = tool_call {
-                                                        if let Some(ref runner) = hook_runner {
-                                                            let pre_call = runner.dispatch_pre_tool_call(tc).await;
-                                                            if let Ok(res) = pre_call {
-                                                                allow = res.allow;
-                                                            }
-                                                        }
+                                                        // Fails closed: a hook that errors denies.
+                                                        (allow, _) = crate::hooks::HookRunner::gate_tool_call(hook_runner.as_ref(), tc).await;
                                                         if allow {
                                                             let key = (step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0));
                                                             pending_calls.lock().await.insert(key, tc.clone());
@@ -674,36 +829,142 @@ impl WasmConnectionStrategy {
                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
-                                            let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
-                                            let learned_cascade = conn_cascade_id_for_ws.lock().await;
-                                            let is_subagent = learned_cascade.as_ref().is_some_and(|cid| !sub_id.is_empty() && sub_id != *cid);
-                                            tracing::debug!("TrajectoryStateUpdate: trajectory_id={:?}, state={:?}, is_subagent={}, learned_cascade_id={:?}", sub_id, tsu.state, is_subagent, *learned_cascade);
-                                            drop(learned_cascade);
+                                            let traj_id = tsu.trajectory_id.clone().unwrap_or_default();
+                                            let main_id = conn_cascade_id_for_ws.lock().await;
+                                            // Only the main trajectory drives idle; subagent
+                                            // trajectories return early (event_processor.py:539-542).
+                                            let is_main = main_id
+                                                .as_ref()
+                                                .is_none_or(|id| traj_id.is_empty() || traj_id == *id);
+                                            drop(main_id);
 
-                                            let mut active_subs = conn_active_subagents.lock().await;
-                                            let mut p_idle = conn_parent_idle.lock().await;
-
-                                            if tsu.state == Some(1) { // STATE_RUNNING
-                                                if is_subagent {
-                                                    active_subs.insert(sub_id);
+                                            if !is_main {
+                                                // A subagent finishing is how a START_SUBAGENT call
+                                                // completes — the harness sends no tool response for
+                                                // it. Without this a `post_tool_call` hook saw the
+                                                // pre_tool_call and never a matching completion.
+                                                if tsu.state == Some(2) || tsu.state == Some(3) {
+                                                    let response = conn_subagent_responses
+                                                        .lock()
+                                                        .await
+                                                        .remove(&traj_id)
+                                                        .unwrap_or_else(|| traj_id.clone());
+                                                    if let Some(runner) = hook_runner.as_ref() {
+                                                        let tr = crate::types::ToolResult {
+                                                            name: crate::types::BuiltinTools::StartSubagent
+                                                                .as_str()
+                                                                .to_string(),
+                                                            id: None,
+                                                            result: Some(Value::String(response)),
+                                                            error: None,
+                                                            server_name: None,
+                                                            exception: None,
+                                                        };
+                                                        let runner = runner.clone();
+                                                        crate::spawn_task(async move {
+                                                            let _ = runner.dispatch_post_tool_call(&tr).await;
+                                                        });
+                                                    }
                                                 }
-                                            } else if tsu.state == Some(2) { // STATE_IDLE
-                                                if is_subagent {
-                                                    active_subs.remove(&sub_id);
-                                                } else {
-                                                    *p_idle = true;
-                                                }
+                                                continue;
                                             }
 
-                                            tracing::debug!("TrajectoryStateUpdate: p_idle={}, active_subs_empty={}", *p_idle, active_subs.is_empty());
-                                            if *p_idle && active_subs.is_empty() && !conn_is_idle.swap(true, Ordering::SeqCst) {
+                                            // A turn that failed server-side reports its
+                                            // reason here; without this the stream just ends
+                                            // (event_processor.py:554-557).
+                                            if let Some(ref err) = tsu.error
+                                                && !err.is_empty()
+                                            {
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(anyhow!(
+                                                        "{err}"
+                                                    )),
+                                                );
+                                            }
+
+                                            if tsu.state == Some(3) { // STATE_CANCELLED
+                                                conn_cancel_requested.store(false, Ordering::SeqCst);
+                                                let reason = tsu
+                                                    .error
+                                                    .clone()
+                                                    .filter(|e| !e.is_empty())
+                                                    .unwrap_or_else(|| "Turn cancelled".to_string());
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(
+                                                        anyhow!(crate::error::AntigravityError::Cancelled(reason)),
+                                                    ),
+                                                );
+                                            } else if tsu.state == Some(2) // STATE_FULLY_IDLE
+                                                && conn_cancel_requested.swap(false, Ordering::SeqCst)
+                                            {
+                                                // A halt the caller asked for. The harness stops
+                                                // the turn and reports ordinary idle, so this is
+                                                // the only point at which the two can be told
+                                                // apart (A3, docs/remaining-work.md).
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(
+                                                        anyhow!(crate::error::AntigravityError::Cancelled(
+                                                            "Cancelled by caller".to_string()
+                                                        )),
+                                                    ),
+                                                );
+                                            }
+
+                                            if tsu.state == Some(2) || tsu.state == Some(3) { // STATE_FULLY_IDLE | STATE_CANCELLED
+                                                conn_is_idle.store(true, Ordering::SeqCst);
+                                                let _ = conn_idle_tx.send(true);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
-                                                let sentinel = Step {
-                                                    id: "IDLE_SENTINEL".to_string(),
-                                                    ..Default::default()
-                                                };
-                                                let _ = step_tx.send(Ok(sentinel));
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
                                             }
+                                        }
+                                        crate::proto::localharness::output_event::Event::InitializeConversationResponse(resp) => {
+                                            // The harness's first frame since 0.1.4. Reading it
+                                            // during the handshake — and seeding the conversation
+                                            // with `resp.history` on a resumed session — is WP-6;
+                                            // until then a resumed session silently starts empty.
+                                            // The reader loop is already running when this
+                                            // frame arrives — this transport has no split
+                                            // stream to read from before spawning — so the
+                                            // replayed history is published here and awaited
+                                            // by `initial_history()` (A5).
+                                            tracing::debug!(
+                                                "initialize_conversation_response ({} history steps)",
+                                                resp.history.len()
+                                            );
+                                            let replayed: Vec<Step> = resp
+                                                .history
+                                                .iter()
+                                                .filter_map(crate::step_extract::step_from_update)
+                                                .collect();
+                                            let _ = conn_initial_history.send(Some(replayed));
+                                        }
+                                        crate::proto::localharness::output_event::Event::CallHookRequest(req) => {
+                                            // The harness blocks its turn until a
+                                            // CallHookResponse with this request_id comes
+                                            // back, so this arm must always answer — even
+                                            // when it does not understand the request.
+                                            let hook_runner = hook_runner.clone();
+                                            let conn_ws_tx = conn_ws_tx.clone();
+                                            crate::spawn_task(async move {
+                                                let response = crate::hook_dispatch::answer_hook_request(
+                                                    hook_runner.as_ref(),
+                                                    &req,
+                                                )
+                                                .await;
+                                                let input_event = InputEvent {
+                                                    event: Some(crate::proto::localharness::input_event::Event::CallHookResponse(response)),
+                                                };
+                                                if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                    let _ = conn_ws_tx.send(raw_json);
+                                                }
+                                            });
+                                        }
+                                        crate::proto::localharness::output_event::Event::SessionEndResponse(_) => {
+                                            // The harness has flushed the trajectory. Release
+                                            // `disconnect()`, which waits for this before tearing
+                                            // the process down (B7).
+                                            tracing::debug!("session_end_response");
+                                            let _ = conn_session_end.send(true);
                                         }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
@@ -713,12 +974,13 @@ impl WasmConnectionStrategy {
                                             let learned_id_clone = conn_learned_id.clone();
                                             let counter = client_tool_step_counter.clone();
                                             crate::spawn_task(async move {
-                                                let args: Value = serde_json::from_str(&tool_call.arguments_json.clone().unwrap_or_default()).unwrap_or(Value::Null);
+                                                let args: Value = crate::tool_wire::parse_arguments(tool_call.arguments_json.as_deref());
                                                 let tc = ToolCall {
                                                     id: tool_call.id.clone().unwrap_or_default(),
                                                     name: tool_call.name.clone().unwrap_or_default(),
                                                     args: args.clone(),
                                                     canonical_path: None,
+                                                    server_name: None,
                                                 };
                                                 tracing::debug!("ToolCall event received: id={}, name={}", tc.id, tc.name);
 
@@ -739,15 +1001,11 @@ impl WasmConnectionStrategy {
                                                     trajectory_id: traj_id.clone(),
                                                     ..Default::default()
                                                 };
-                                                let _ = step_tx_clone.send(Ok(active_step));
+                                                let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(active_step)));
 
-                                                let allow = if let Some(runner) = hook_runner.as_ref() {
-                                                    let res = runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow);
-                                                    tracing::debug!("Policy decision for tool {}: allow={}", tc.name, res);
-                                                    res
-                                                } else {
-                                                    true
-                                                };
+                                                // Fails closed: a hook that errors denies.
+                                                let (allow, deny_reason) = crate::hooks::HookRunner::gate_tool_call(hook_runner.as_ref(), &tc).await;
+                                                tracing::debug!("Policy decision for tool {}: allow={}", tc.name, allow);
 
                                                 if !allow {
                                                     // Emit ERROR step for denied tool call
@@ -759,18 +1017,22 @@ impl WasmConnectionStrategy {
                                                         target: StepTarget::Environment,
                                                         status: StepStatus::Error,
                                                         content: tc.name.clone(),
-                                                        error: "Execution denied by hook policy".to_string(),
+                                                        error: if deny_reason.is_empty() {
+                                                            "Execution denied by hook policy".to_string()
+                                                        } else {
+                                                            deny_reason.clone()
+                                                        },
                                                         tool_calls: vec![tc.clone()],
                                                         trajectory_id: traj_id,
                                                         ..Default::default()
                                                     };
-                                                    let _ = step_tx_clone.send(Ok(denied_step));
+                                                    let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(denied_step)));
 
                                                     let resp = ToolResponse {
                                                         id: tool_call.id.clone(),
                                                         response_json: Some("{\"error\": \"Execution denied by hook policy\"}".to_string()),
+                                                        error_message: None,
                                                         supplemental_media: Vec::new(),
-                                                        response: None,
                                                     };
                                                     let input_event = InputEvent {
                                                         event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
@@ -786,6 +1048,8 @@ impl WasmConnectionStrategy {
                                                     name: tc.name.clone(),
                                                     result: None,
                                                     error: None,
+                                                    server_name: None,
+                                                    exception: None,
                                                 };
 
                                                 if let Some(ref runner) = tool_runner {
@@ -799,12 +1063,12 @@ impl WasmConnectionStrategy {
                                                 }
 
                                                 if let (Some(err_str), Some(runner)) = (result.error.as_ref(), hook_runner.as_ref()) {
-                                                    if let Ok((res, val)) = runner.dispatch_on_tool_error(&anyhow!(err_str.clone())).await {
-                                                        let allow_error = res.allow;
-                                                        if allow_error {
-                                                            result.result = val;
-                                                            result.error = None;
-                                                        }
+                                                    // The hook may reword the failure. It may not
+                                                    // turn it into a success: clearing the error
+                                                    // reported a tool that had failed to the model
+                                                    // as having worked (H4).
+                                                    if let Some(message) = runner.dispatch_on_tool_error(&anyhow!(err_str.clone())).await {
+                                                        result.error = Some(message);
                                                     }
                                                 } else if let Some(runner) = hook_runner.as_ref() {
                                                     let _ = runner.dispatch_post_tool_call(&result).await;
@@ -830,31 +1094,14 @@ impl WasmConnectionStrategy {
                                                         name: tc.name.clone(),
                                                         args: result_args,
                                                         canonical_path: None,
+                                                        server_name: None,
                                                     }],
                                                     trajectory_id: traj_id,
                                                     ..Default::default()
                                                 };
-                                                let _ = step_tx_clone.send(Ok(done_step));
+                                                let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(done_step)));
 
-                                                // Wrap non-object values under "result"
-                                                let resp_json = if let Some(ref val) = result.result {
-                                                    if val.is_object() {
-                                                        serde_json::to_string(val).unwrap_or_default()
-                                                    } else {
-                                                        serde_json::to_string(&serde_json::json!({ "result": val })).unwrap_or_default()
-                                                    }
-                                                } else if let Some(ref err) = result.error {
-                                                    serde_json::to_string(&serde_json::json!({ "error": err })).unwrap_or_default()
-                                                } else {
-                                                    "{}".to_string()
-                                                };
-
-                                                let resp = ToolResponse {
-                                                    id: tool_call.id.clone(),
-                                                    response_json: Some(resp_json),
-                                                    supplemental_media: Vec::new(),
-                                                    response: None,
-                                                };
+                                                let resp = crate::tool_wire::tool_response(tool_call.id.clone(), &result);
                                                 let input_event = InputEvent {
                                                     event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
                                                 };
@@ -884,10 +1131,26 @@ impl WasmConnectionStrategy {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
                     Err(e) => {
-                        let _ = step_tx.send(Err(anyhow!("WS read error: {e:?}")));
+                        let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
+                            "WS read error: {e:?}"
+                        )));
                         break;
                     }
                 }
+            }
+
+            // The socket is gone. If the turn had not reached idle, it died
+            // mid-turn: say so rather than ending the stream as though the turn
+            // had completed. There is no stderr to quote on this transport —
+            // the local one appends the harness's own last words here.
+            conn_socket_closed.store(true, Ordering::SeqCst);
+            if !conn_is_idle_for_close.load(Ordering::SeqCst) {
+                let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
+                    "harness connection closed before the turn finished"
+                )));
+                conn_is_idle_for_close.store(true, Ordering::SeqCst);
+                let _ = conn_idle_tx.send(true);
+                let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
             }
         });
 
@@ -904,9 +1167,15 @@ impl WasmConnectionStrategy {
             ws_tx,
             tool_runner: self.tool_runner.clone(),
             hook_runner: self.hook_runner.clone(),
-            parent_idle,
-            active_subagent_ids,
             step_trackers,
+            main_trajectory_id: conn_cascade_id,
+            cancel_requested,
+            steps_consumed: Arc::new(AtomicBool::new(false)),
+            idle_tx,
+            initial_history_tx,
+            session_end_tx,
+            socket_closed,
+            subagent_responses,
         })
     }
 }
@@ -918,13 +1187,57 @@ pub struct WasmConnection {
     conversation_id: String,
     learned_id: Arc<std::sync::OnceLock<String>>,
     is_idle: Arc<AtomicBool>,
-    step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<Step, anyhow::Error>>>>>,
+    step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<crate::step_extract::StepEvent>>>>,
     ws_tx: mpsc::UnboundedSender<String>,
     tool_runner: Option<ToolRunner>,
     hook_runner: Option<HookRunner>,
-    parent_idle: Arc<Mutex<bool>>,
-    active_subagent_ids: Arc<Mutex<HashSet<String>>>,
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
+    /// The trajectory whose idle transitions end a turn. Learned from the first
+    /// `StepUpdate` of each turn and cleared by `send()`, mirroring upstream's
+    /// `reset_for_turn()` (`event_processor.py:379-386`).
+    main_trajectory_id: Arc<Mutex<Option<String>>>,
+    /// Set by [`Connection::send_halt_request`], cleared by the next `send()`
+    /// or by the idle transition that consumes it. See the field of the same
+    /// name on `LocalConnection` for why it is needed.
+    cancel_requested: Arc<AtomicBool>,
+    /// Whether a `receive_steps()` stream is currently live. See that method.
+    steps_consumed: Arc<AtomicBool>,
+    /// Mirrors `is_idle` for [`Connection::wait_for_idle`].
+    idle_tx: tokio::sync::watch::Sender<bool>,
+    /// The handshake reply's replayed history, published by the reader.
+    initial_history_tx: tokio::sync::watch::Sender<Option<Vec<Step>>>,
+    /// Set when the harness answers `session_end_request`.
+    session_end_tx: tokio::sync::watch::Sender<bool>,
+    /// Set once the websocket reader has seen the socket close.
+    socket_closed: Arc<AtomicBool>,
+    /// Last model text per subagent trajectory; see the capture site in the
+    /// reader loop. Cleared per turn.
+    subagent_responses: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl WasmConnection {
+    /// Steps the harness replayed when the conversation was resumed.
+    ///
+    /// Waits for the handshake reply, which arrives on the reader task rather
+    /// than being read inline: this transport shares one socket and has no
+    /// split stream to read from before the reader starts. Returns empty on
+    /// timeout, which is what a pre-0.1.4 harness produces — it never answers.
+    pub async fn initial_history(&self) -> Vec<Step> {
+        let mut rx = self.initial_history_tx.subscribe();
+        let already_here = rx.borrow_and_update().clone();
+        if let Some(history) = already_here {
+            return history;
+        }
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS),
+            rx.wait_for(Option::is_some),
+        )
+        .await;
+        match waited {
+            Ok(Ok(history)) => history.clone().unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl Connection for WasmConnection {
@@ -940,65 +1253,66 @@ impl Connection for WasmConnection {
         self.is_idle.load(Ordering::SeqCst)
     }
 
+    async fn wait_for_idle(&self) {
+        if self.is_idle() {
+            return;
+        }
+        // Watch rather than poll: the reader sets this the moment the harness
+        // reports idle, so a caller learns immediately instead of on the next
+        // tick of a sleep loop.
+        let mut rx = self.idle_tx.subscribe();
+        let _ = rx.wait_for(|idle| *idle).await;
+    }
+
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
+        // One consumer at a time. Two live streams share a single receiver, so
+        // each would take roughly half the steps and neither caller would see a
+        // complete turn — silently. Refusing is the only honest answer; the
+        // claim is released when the first stream is dropped, which is what
+        // makes the per-turn `receive_steps()` call still work.
+        let Some(claim) = crate::step_extract::ConsumerGuard::claim(&self.steps_consumed) else {
+            return stream::once(async {
+                Err(anyhow!(
+                    "receive_steps() is single-consumer and a stream is already active; \
+                     drop it before subscribing again"
+                ))
+            })
+            .boxed();
+        };
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold(false, move |mut checked_initial_idle| {
+        stream::unfold(claim, move |claim| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
-                // If the connection is already idle on the first poll and the queue is empty, terminate.
-                if !checked_initial_idle {
-                    checked_initial_idle = true;
-                    let mut guard = step_rx.lock().await;
-                    if guard
-                        .as_mut()
-                        .is_some_and(|rx| rx.is_empty() && is_idle.load(Ordering::SeqCst))
-                    {
-                        return None;
-                    }
-                }
-
                 loop {
+                    // Head condition, upstream local_connection.py:339-341: the
+                    // stream ends only when the connection is idle AND nothing
+                    // is queued behind the idle event. Returning on the idle
+                    // event itself drops every step queued after it.
                     let mut guard = step_rx.lock().await;
                     let Some(rx) = &mut *guard else {
+                        drop(guard);
                         return None;
                     };
-                    match rx.try_recv() {
-                        Ok(step_res) => match &step_res {
-                            Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                if is_idle.load(Ordering::SeqCst) {
-                                    return None;
-                                }
-                            }
-                            _ => {
-                                return Some((step_res, checked_initial_idle));
-                            }
-                        },
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            drop(guard);
-                            let mut guard2 = step_rx.lock().await;
-                            let Some(rx2) = &mut *guard2 else {
-                                return None;
-                            };
-                            let step_res = rx2.recv().await;
-                            drop(guard2);
-                            match step_res {
-                                Some(res) => match &res {
-                                    Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                        if is_idle.load(Ordering::SeqCst) {
-                                            return None;
-                                        }
-                                    }
-                                    _ => {
-                                        return Some((res, checked_initial_idle));
-                                    }
-                                },
-                                None => return None,
-                            }
+                    if is_idle.load(Ordering::SeqCst) && rx.is_empty() {
+                        drop(guard);
+                        return None;
+                    }
+                    let received = rx.recv().await;
+                    drop(guard);
+
+                    match received {
+                        None => return None,
+                        // Falls through to re-evaluate the head condition
+                        // rather than ending the stream: more steps may already
+                        // be queued behind the idle marker.
+                        Some(crate::step_extract::StepEvent::Idle) => {}
+                        Some(crate::step_extract::StepEvent::Step(step)) => {
+                            return Some((Ok(*step), claim));
                         }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            return None;
+                        Some(crate::step_extract::StepEvent::Error(e)) => {
+                            return Some((Err(e), claim));
                         }
                     }
                 }
@@ -1008,14 +1322,26 @@ impl Connection for WasmConnection {
     }
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
+        // Before any state is touched: a denied turn must leave the connection
+        // exactly as it was, not half-reset with a cleared trajectory.
+        crate::hook_dispatch::gate_turn(self.hook_runner.as_ref()).await?;
+
         self.is_idle.store(false, Ordering::SeqCst);
+        let _ = self.idle_tx.send(false);
+        // A halt applies to the turn it interrupted. Leaving the flag set would
+        // make the *next* turn report itself cancelled the moment it went idle.
+        self.cancel_requested.store(false, Ordering::SeqCst);
         {
-            let mut p_idle = self.parent_idle.lock().await;
-            *p_idle = false;
+            // A new turn may run on a new trajectory; relearn it rather than
+            // judging this turn against the last one's (upstream
+            // reset_for_turn(), event_processor.py:379-386).
+            let mut main_id = self.main_trajectory_id.lock().await;
+            *main_id = None;
         }
         {
-            let mut active = self.active_subagent_ids.lock().await;
-            active.clear();
+            // Last turn's subagent text must not be attributed to this turn's
+            // subagents (upstream clears the same map in send()).
+            self.subagent_responses.lock().await.clear();
         }
         {
             let mut guard = self.step_rx.lock().await;
@@ -1026,8 +1352,40 @@ impl Connection for WasmConnection {
 
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::UserInput(
-                content.to_string(),
+                crate::harness_config::sanitize_prompt(content),
             )),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        crate::hook_dispatch::gate_turn(self.hook_runner.as_ref()).await?;
+
+        self.is_idle.store(false, Ordering::SeqCst);
+        let _ = self.idle_tx.send(false);
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        {
+            let mut main_id = self.main_trajectory_id.lock().await;
+            *main_id = None;
+        }
+        {
+            self.subagent_responses.lock().await.clear();
+        }
+        {
+            let mut guard = self.step_rx.lock().await;
+            if let Some(rx) = &mut *guard {
+                while rx.try_recv().is_ok() {}
+            }
+        }
+
+        let input_event = InputEvent {
+            event: Some(
+                crate::proto::localharness::input_event::Event::ComplexUserInput(
+                    crate::harness_config::build_user_input_proto(content),
+                ),
+            ),
         };
         let raw_json = serde_json::to_string(&input_event)?;
         self.ws_tx.send(raw_json)?;
@@ -1048,6 +1406,7 @@ impl Connection for WasmConnection {
     }
 
     async fn send_halt_request(&self) -> Result<(), anyhow::Error> {
+        self.cancel_requested.store(true, Ordering::SeqCst);
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::HaltRequest(
                 true,
@@ -1093,8 +1452,8 @@ impl Connection for WasmConnection {
         let resp = ToolResponse {
             id: Some(id.to_string()),
             response_json: Some(resp_json),
+            error_message: None,
             supplemental_media: Vec::new(),
-            response: None,
         };
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
@@ -1159,7 +1518,40 @@ impl Connection for WasmConnection {
     }
 
     async fn disconnect(&self) -> Result<(), anyhow::Error> {
-        // No explicit subprocess to kill in WASM connection.
+        // No subprocess to tear down on this transport, but the session-end
+        // hooks still have to run — upstream dispatches them from disconnect()
+        // (0.1.1 local_connection.py:686-690).
+        if let Some(ref runner) = self.hook_runner
+            && let Err(e) = runner.dispatch_session_end().await
+        {
+            tracing::error!("on_session_end hook failed: {e:?}");
+        }
+
+        // Tell the harness the session is over and wait for it to say it has
+        // flushed. Upstream sends this before closing stdin; skipping it meant
+        // shutdown raced the harness's own trajectory write (B7).
+        // Nothing to wait for once the socket is gone — a crashed harness will
+        // never answer, and blocking on it would add the full timeout to every
+        // teardown after a crash.
+        if !self.socket_closed.load(Ordering::SeqCst) {
+            let input_event = InputEvent {
+                event: Some(
+                    crate::proto::localharness::input_event::Event::SessionEndRequest(true),
+                ),
+            };
+            if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                let _ = self.ws_tx.send(raw_json);
+                let mut rx = self.session_end_tx.subscribe();
+                // Bounded: a harness that never answers must not hold shutdown
+                // open, and closing stdin below stops it regardless.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(SESSION_END_TIMEOUT_SECONDS),
+                    rx.wait_for(|acked| *acked),
+                )
+                .await;
+            }
+        }
+
         Ok(())
     }
 }
@@ -1178,6 +1570,8 @@ fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
         name: tool_call.name,
         result,
         error,
+        server_name: None,
+        exception: None,
     })
 }
 
@@ -1277,17 +1671,16 @@ mod tests {
         assert_eq!(tc.id, "traj_1_2");
         assert_eq!(tc.name, "RUN_COMMAND");
         assert_eq!(tc.canonical_path, None);
-        // The execution-result fields are always present, `null` until the
-        // harness reports them. This assertion previously omitted them: the
-        // wasm extractor was a stale fork of the native one, and the two are
-        // now a single implementation in `crate::step_extract`.
+        // Arguments only. `combined_output` and `exit_code` are results and
+        // were carried here for a while: a `pre_tool_call` predicate reading
+        // them saw them null, because the command has not run, so a rule built
+        // on them silently allowed everything. They reach `post_tool_call` on
+        // the `ToolResult` instead.
         assert_eq!(
             tc.args,
             serde_json::json!({
                 "command_line": "echo hello",
-                "working_dir": "work_dir",
-                "combined_output": null,
-                "exit_code": null
+                "working_dir": "work_dir"
             })
         );
 
@@ -1354,7 +1747,10 @@ mod tests {
         assert_eq!(
             tc.args,
             serde_json::json!({
-                "file_path": "edit_path"
+                "file_path": "edit_path",
+                // The edit itself, so a policy predicate can inspect the change
+                // and not just the path.
+                "diff_block": []
             })
         );
 
@@ -1403,6 +1799,7 @@ mod tests {
             trajectory_id: Some("traj_1".to_string()),
             step_index: Some(9),
             generate_image: Some(ActionGenerateImage {
+                aspect_ratio: None,
                 prompt: Some("a gold dragon logo".to_string()),
                 image_paths: vec!["/tmp/dragon.png".to_string()],
                 image_name: Some("dragon_logo".to_string()),
@@ -1443,7 +1840,14 @@ mod tests {
             let text = msg.to_text().unwrap();
             assert!(text.contains("InitializeConversationEvent") || text.contains("cascadeId"));
 
-            // 2. Send trajectoryStateUpdate (RUNNING)
+            // 2. Wait for the client's prompt. The connection starts idle
+            // (C2), so the turn only begins once something is sent — the same
+            // send()-then-receive order every real caller uses.
+            let msg2 = ws_stream.next().await.unwrap().unwrap();
+            let text2 = msg2.to_text().unwrap();
+            assert!(text2.contains("hello"));
+
+            // 3. Send trajectoryStateUpdate (RUNNING)
             let traj_running = serde_json::json!({
                 "trajectoryStateUpdate": {
                     "trajectoryId": "test_traj",
@@ -1455,7 +1859,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // 3. Send StepUpdate
+            // 4. Send StepUpdate
             let step_update = serde_json::json!({
                 "stepUpdate": {
                     "stepIndex": 1,
@@ -1473,11 +1877,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            // 4. Send trajectoryStateUpdate (IDLE)
+            // 5. Send trajectoryStateUpdate (IDLE)
             let traj_idle = serde_json::json!({
                 "trajectoryStateUpdate": {
                     "trajectoryId": "test_traj",
-                    "state": "STATE_IDLE"
+                    // Renamed from STATE_IDLE upstream in 0.1.9; protojson
+                    // matches on the value name, not the number.
+                    "state": "STATE_FULLY_IDLE"
                 }
             });
             ws_stream
@@ -1485,13 +1891,21 @@ mod tests {
                 .await
                 .unwrap();
 
-            // 5. Wait for the client to send "hello"
-            let msg2 = ws_stream.next().await.unwrap().unwrap();
-            let text2 = msg2.to_text().unwrap();
-            assert!(text2.contains("hello"));
-
-            // Keep connection open long enough
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Stay up until the client goes away, rather than sleeping a fixed
+            // 50ms and hoping. The client's teardown now includes a session-end
+            // handshake, and a fixed sleep made this test flaky under load —
+            // it failed once in a full run and passed in isolation.
+            while let Some(msg) = ws_stream.next().await {
+                let Ok(WsMessage::Text(text)) = msg else {
+                    break;
+                };
+                if text.contains("sessionEndRequest") {
+                    let ack = serde_json::json!({ "sessionEndResponse": true });
+                    let _ = ws_stream.send(WsMessage::Text(ack.to_string())).await;
+                    // The session is over by definition; nothing follows it.
+                    break;
+                }
+            }
         });
 
         // Configure host/port via static atomic variable (safe, no unsafe_code)
@@ -1510,11 +1924,20 @@ mod tests {
             tool_runner: None,
             hook_runner: None,
             conversation_id: "test_traj".to_string(),
+            mcp_servers: Vec::new(),
+            subagents: Vec::new(),
+            retry_config: None,
+            tool_output_truncation: None,
         };
 
         // Connect
         let conn = strategy.connect().await.unwrap();
         assert_eq!(conn.conversation_id(), "test_traj");
+
+        // Send first: the connection starts idle, so subscribing before a
+        // prompt yields an empty stream rather than blocking on a turn that was
+        // never started.
+        conn.send("hello").await.unwrap();
 
         // Consume the step stream
         let mut steps = conn.receive_steps();
@@ -1526,10 +1949,11 @@ mod tests {
         let next_step = steps.next().await;
         assert!(next_step.is_none());
 
-        // Send a message
-        conn.send("hello").await.unwrap();
-
         // Join the server task
-        server_handle.await.unwrap();
+        // Close the connection so the server task's read loop ends, then join
+        // it. Dropping the connection is what a real caller's teardown does.
+        conn.disconnect().await.unwrap();
+        drop(conn);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle).await;
     }
 }

@@ -127,7 +127,9 @@ impl Tool for CounterTool {
     fn needs_context(&self) -> bool { true } // Opt-in
 
     async fn call(&self, _args: Value) -> Result<Value, anyhow::Error> {
-        Ok(Value::Null) // Fallback when no context
+        // Never reached: a `needs_context` tool called without a context is an
+        // error result, not a silent fallback.
+        unreachable!()
     }
 
     async fn call_with_context(
@@ -147,13 +149,23 @@ impl Tool for CounterTool {
 ```rust,no_run
 pub struct ToolContext {
     // Methods:
-    fn conversation_id(&self) -> &str;
-    fn is_idle(&self) -> bool;
+    fn conversation_id(&self) -> Option<String>;
+    fn is_idle(&self) -> Option<bool>;
     async fn send(&self, message: &str) -> Result<()>;
     fn get_state<T: DeserializeOwned>(&self, key: &str) -> Option<T>;
     fn set_state<T: Serialize>(&self, key: &str, value: T);
+    fn update_state<T, F>(&self, key: &str, transform: F); // atomic read-modify-write
 }
 ```
+
+The context holds a **weak** handle to the session — the connection owns the
+tool runner, so a strong one would be a cycle that never frees. The two
+`Option`-returning methods are `None`, and `send` errors, once the agent has
+stopped.
+
+`Agent::start()` attaches the context. A `needs_context` tool invoked with none
+attached returns an error result rather than falling back to `call()`, which
+would run the tool in a subtly different mode.
 
 > **Note**: Tool state is independent of Hook state. They use separate stores.
 
@@ -173,6 +185,9 @@ The SDK provides these built-in tools (managed by the harness):
 | `StartSubagent` | Launch sub-agents |
 | `GenerateImage` | Generate images |
 | `Finish` | Signal task completion |
+| `AskQuestion` | Put a multiple-choice question to the user |
+| `SearchWeb` | Search the web (harness-side) |
+| `ReadUrlContent` | Fetch and summarize a URL (harness-side) |
 | `GrepSearch` | Grep-based search |
 
 ### Read-Only Tools
@@ -238,3 +253,59 @@ impl Tool for InventoryTool {
 | `ToolRunner.execute()` | `ToolRunner::execute()` |
 | `ToolContext` with `get_state`/`set_state` | `ToolContext` with `get_state`/`set_state` |
 | Sync/async auto-detection | All tools are async |
+
+## Names must be unique
+
+Registering two tools with the same name is an error, surfaced from
+`Agent::start()`. Silently replacing the first — the old behaviour — meant a
+collision between two modules' tools resolved to whichever registered last, and
+the model called something the caller never meant to expose.
+
+Registration order is preserved, and it is the order the tool list reaches the
+model in.
+
+## A batch runs concurrently
+
+When the model asks for several tools at once, they execute concurrently and
+the batch takes as long as its slowest member rather than the sum. Results come
+back in call order regardless of which finished first. Tools that share mutable
+state need their own synchronisation.
+
+## Failures on the wire
+
+A tool that fails sends the harness both a payload and `error_message`. The
+field was never set before, so a failed call was recorded as a success whose
+output happened to mention an error.
+
+`ToolResult` carries the failure twice on purpose: `error` is the message the
+model is shown, and `exception` is the same failure as a
+`ToolExecutionError { message, tool_name, server_name }` for hooks that route
+or count failures. `server_name` is `None` for built-ins and client-side Rust
+tools, and set for MCP tools — the name alone is ambiguous across servers.
+
+## Arguments are coerced to your schema
+
+Models routinely send `"3"` where a schema says `integer`, or `"true"` for a
+boolean. Those are converted against the tool's own
+`parameters_json_schema()` before the tool sees them, including inside arrays
+and nested objects, and including a whole array or object that arrived as JSON
+text.
+
+Only unambiguous conversions are made. `"not a number"` for an `integer` is
+passed through untouched, so a genuine type error still surfaces as one rather
+than being papered over.
+
+## Named subagents
+
+`AgentBuilder::subagent(...)` declares a subagent the model can delegate to.
+Three rules are enforced when the config is built, matching upstream:
+
+- Capabilities default to the **read-only** built-ins. A subagent that inherited
+  everything is not what "default" should mean.
+- `START_SUBAGENT` is dropped with a warning: the harness does not support a
+  subagent spawning subagents.
+- Naming a client-side tool that is not registered on the main agent is an
+  error, not a subagent that silently cannot call it.
+
+`enabled_tools` and `disabled_tools` are mutually exclusive; setting both is a
+configuration error rather than a silent precedence rule.

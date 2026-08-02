@@ -12,7 +12,7 @@ use antigravity_sdk_rust::types::{AskQuestionEntry, HookResult, QuestionHookResu
 
 pub trait Hook: Send + Sync {
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(&self) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+    fn on_session_start<'a>(&'a self, _context: &'a HookContext) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
 
@@ -43,21 +43,15 @@ pub trait Hook: Send + Sync {
         async { Ok(()) }
     }
 
-    /// Triggered when a tool execution encounters an error.
-    /// Allows fallback logic or customized error payloads.
+    /// Triggered when a tool execution fails.
+    /// `Some(message)` replaces the error text the model is shown; `None`
+    /// leaves it. A failure cannot be turned into a success.
     fn on_tool_error<'a>(
         &'a self,
-        error: &'a anyhow::Error,
-    ) -> impl std::future::Future<Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>> + Send {
-        async move {
-            Ok((
-                HookResult {
-                    allow: false,
-                    message: error.to_string(),
-                },
-                None,
-            ))
-        }
+        _error: &'a anyhow::Error,
+        context: &'a HookContext,
+    ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
+        async { Ok(None) }
     }
 
     /// Intercepts a prompt to ask the user clarifying questions.
@@ -87,7 +81,7 @@ use std::sync::Arc;
 struct LoggerHook;
 
 impl Hook for LoggerHook {
-    fn on_session_start(&self) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+    fn on_session_start<'a>(&'a self, _context: &'a HookContext) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async {
             println!("[Hook] Session has successfully started!");
             Ok(())

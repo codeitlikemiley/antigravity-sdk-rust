@@ -264,7 +264,7 @@ use antigravity_sdk_rust::types::ChatResponse;
 //     text: String,              // Combined model text output
 //     thinking: String,          // Combined reasoning/thinking text
 //     steps: Vec<Step>,          // All intermediate execution steps
-//     usage_metadata: UsageMetadata, // Token consumption stats
+//     usage_metadata: Option<UsageMetadata>, // This turn's token consumption
 // }
 ```
 
@@ -378,7 +378,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let response = agent.chat("Explain Rust's ownership model in 3 sentences.").await?;
     println!("{}", response.text);
-    println!("Tokens used: {}", response.usage_metadata.total_token_count);
+    if let Some(usage) = &response.usage_metadata {
+    println!("Tokens used: {}", usage.total_token_count);
+}
 
     agent.stop().await?;
     Ok(())
@@ -434,13 +436,13 @@ impl Tool for WeatherTool {
 struct AuditHook;
 
 impl Hook for AuditHook {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(&self, tool_call: &ToolCall, ctx: &HookContext) -> Result<HookResult, anyhow::Error> {
         println!("[AUDIT] Tool called: {} with args: {}", tool_call.name, tool_call.args);
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
-        println!("[AUDIT] Turn complete. Tokens: {}", response.usage_metadata.total_token_count);
+    async fn post_turn(&self, response: &str, ctx: &HookContext) -> Result<(), anyhow::Error> {
+        println!("[AUDIT] Turn complete, {} chars", response.len());
         Ok(())
     }
 }

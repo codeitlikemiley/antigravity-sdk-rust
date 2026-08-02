@@ -9,7 +9,7 @@ The SDK orchestrates the interactions between an LLM-based agent (running inside
 * **`Agent`**: Encapsulates binary discovery, workspace checks, safety policy enforcement, and registers tools/hooks.
 * **`Conversation`**: Manages a stateful agent turn. It coordinates the chat completion stream, accumulates step history, and decodes thoughts and text responses.
 * **`Connection`**: The abstract communication trait. This allows swap-in backends (e.g. standard subprocess IPC or WebSockets).
-* **`Hook`**: Callback observers (`on_session_start`, `pre_turn`, `pre_tool_call`, `post_tool_call`, `on_tool_error`, `on_interaction`) allowing custom logic injection.
+* **`Hook`**: Callback observers (`on_session_start`, `pre_turn`, `pre_tool_call`, `post_tool_call`, `on_tool_error` — rewords a failure, cannot clear it — `on_interaction`) allowing custom logic injection.
 * **`Policy`**: Middleware layer enforcing rules (e.g., workspace lock, prompt-to-run).
 * **`Tool`**: Custom Rust capabilities exposed to the Gemini model.
 
@@ -103,12 +103,12 @@ The SDK has been fully refactored to leverage native async traits (stable since 
 - **Zero-overhead Blanket Implementations**: The companion traits are automatically implemented via blanket implementations for any type implementing the base trait:
   ```rust
   pub trait DynHook: Send + Sync {
-      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+      fn on_session_start<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
       // ...
   }
 
   impl<T: Hook + ?Sized> DynHook for T {
-      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+      fn on_session_start<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>> {
           Box::pin(async move { self.on_session_start().await })
       }
       // ...

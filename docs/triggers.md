@@ -24,22 +24,23 @@ The `Trigger` trait defines a single `run` method that receives the active
 connection and executes for the lifetime of the agent:
 
 ```rust,no_run
-use antigravity_sdk_rust::connection::AnyConnection;
+use antigravity_sdk_rust::triggers::TriggerContext;
 
 /// A trait for defining asynchronous background tasks that execute
 /// during a connection lifecycle.
 pub trait Trigger: Send + Sync {
-    /// Launches the trigger task with the active connection.
+    /// Launches the trigger task.
     ///
-    /// This method runs for the lifetime of the agent. Use the connection
-    /// to send notifications back to the agent.
-    async fn run(&self, connection: AnyConnection) -> Result<(), anyhow::Error>;
+    /// Runs for the lifetime of the agent, or until the runner is stopped.
+    async fn run(&self, context: TriggerContext) -> Result<(), anyhow::Error>;
 }
 ```
 
-The connection parameter gives triggers access to
-`send_trigger_notification()`, which pushes a message string into the agent's
-event stream.
+`TriggerContext` has exactly one method — `send(message)` — which pushes a
+message into the agent's event stream. Triggers used to receive the whole
+`AnyConnection`, which let a background task disconnect the agent, answer a
+tool confirmation, or halt a turn the user had just started. Nudging the agent
+is a trigger's job, so nudging is all the context exposes.
 
 ---
 
@@ -50,12 +51,12 @@ that wraps the async `run` method in a `BoxFuture`:
 
 ```rust,no_run
 use futures_util::future::BoxFuture;
-use antigravity_sdk_rust::connection::AnyConnection;
+use antigravity_sdk_rust::triggers::TriggerContext;
 
 /// Object-safe version of `Trigger`, automatically implemented
 /// via a blanket impl for any `T: Trigger`.
 pub trait DynTrigger: Send + Sync {
-    fn run(&self, connection: AnyConnection) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+    fn run(&self, context: TriggerContext) -> BoxFuture<'_, Result<(), anyhow::Error>>;
 }
 
 // Blanket impl: any type implementing Trigger automatically implements DynTrigger.
@@ -84,11 +85,18 @@ use std::sync::Arc;
 | Method | Description |
 |---|---|
 | `TriggerRunner::new(triggers)` | Creates a runner wrapping a `Vec<Arc<dyn DynTrigger>>` |
-| `runner.start(connection)` | Spawns each trigger as an independent tokio task |
+| `runner.start(connection)` | Spawns each trigger as an independent task. **Errors if already running** |
+| `runner.stop()` | Signals every trigger to stop. Idempotent |
+| `runner.is_running()` | Whether the trigger tasks are live |
 
 When `start()` is called, each trigger is cloned (via `Arc`) and spawned into
-its own `tokio::spawn` block. If a trigger's `run` method returns an error,
-it is logged via `tracing::error!` but does not crash the agent.
+its own task. If a trigger's `run` method returns an error, it is logged via
+`tracing::error!` but does not crash the agent.
+
+Starting twice is refused rather than silently doubling every trigger — a
+heartbeat firing at twice its configured rate is hard to diagnose from the
+outside. `Agent::stop()` calls `stop()` before disconnecting, so triggers no
+longer outlive the agent, parked in a sleep and holding a connection.
 
 > [!NOTE]
 > Triggers run independently — one trigger failing does not affect others.
@@ -103,15 +111,26 @@ it is logged via `tracing::error!` but does not crash the agent.
 The `every()` factory function creates a trigger that fires at regular
 intervals, sending a message to the agent each time:
 
+`every()` runs a **callback** on each tick, so a trigger can decide whether it
+has anything to say. `every_notification()` is the fixed-message case. Both
+reject a zero interval, which would spin the task at full speed.
+
 ```rust,no_run
-use antigravity_sdk_rust::trigger_helpers::every;
+use antigravity_sdk_rust::trigger_helpers::{every, every_notification};
 use std::time::Duration;
 
-// Send "check_status" to the agent every 30 seconds
-let heartbeat = every(Duration::from_secs(30), "check_status");
+// Decide per tick
+let monitor = every(Duration::from_secs(30), |ctx| async move {
+    if queue_depth() > 100 {
+        ctx.send("the queue is backing up").await?;
+    }
+    Ok(())
+})?;
 
-// With a custom message
-let monitor = every(Duration::from_millis(500), "fast_poll");
+// Or just send the same thing every time
+let heartbeat = every_notification(Duration::from_secs(30), "check_status")?;
+# fn queue_depth() -> usize { 0 }
+# Ok::<(), anyhow::Error>(())
 ```
 
 The returned `PeriodicTrigger` loops indefinitely:

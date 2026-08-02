@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Weekly, Monday 07:00 UTC. Upstream drift is not urgent, but three minor
+    # versions of it went unnoticed because nothing ever looked.
+    - cron: '0 7 * * 1' 
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +30,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # src/wasm.rs is a fork of src/local.rs and is compiled by nothing
+          # else: `--all-targets` builds it only as a host test.
+          targets: wasm32-unknown-unknown
 
       - name: Cache dependencies
         uses: swatinem/rust-cache@v2
@@ -38,3 +45,46 @@ jobs:
 
       - name: Run Tests
         run: cargo test --all-targets --all-features
+
+      # `--all-targets` excludes doctests, so every ``` block in the crate docs
+      # is currently uncompiled.
+      - name: Run doctests
+        run: cargo test --doc
+
+      # The wasm transport duplicates most of the native one. Without this step
+      # a change can land in src/local.rs, miss its src/wasm.rs mirror, and go
+      # unnoticed -- which has already happened once.
+      - name: Check wasm target
+        run: cargo check --target wasm32-unknown-unknown --lib
+
+      # Each of these declares its own workspace, so the root build never sees
+      # them and an API change does not break them until a user hits it.
+      - name: Check directory examples
+        run: |
+          for manifest in examples/*/Cargo.toml; do
+            echo "::group::${manifest}"
+            cargo check --manifest-path "${manifest}" --all-targets
+            echo "::endgroup::"
+          done
+
+  # The whole reason this crate drifted three minor versions behind upstream is
+  # that nothing was watching. This job fails when a newer google-antigravity
+  # release exists than the one proto/localharness.proto was generated from, and
+  # when the generated proto no longer matches what that release actually ships.
+  upstream-drift:
+    name: Upstream drift
+    runs-on: ubuntu-latest
+    # Advisory on a pull request; a scheduled run is where it should page.
+    continue-on-error: true
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet protobuf requests
+
+      - name: Compare the pinned harness against the newest release
+        run: python3 scripts/check_upstream_drift.py
+

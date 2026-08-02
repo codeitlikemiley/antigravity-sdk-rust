@@ -12,7 +12,11 @@ struct SubagentHook {
 }
 
 impl Hook for SubagentHook {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(
+        &self,
+        tool_call: &ToolCall,
+        _context: &antigravity_sdk_rust::context::HookContext,
+    ) -> Result<HookResult, anyhow::Error> {
         if tool_call.name == "START_SUBAGENT" {
             self.subagent_active.store(true, Ordering::SeqCst);
             println!("\n  --- 🤖 [Hook] Spawning Subagent ---");
@@ -34,7 +38,11 @@ impl Hook for SubagentHook {
         })
     }
 
-    async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
+    async fn post_tool_call(
+        &self,
+        result: &ToolResult,
+        _context: &antigravity_sdk_rust::context::HookContext,
+    ) -> Result<(), anyhow::Error> {
         if result.name == "START_SUBAGENT" {
             self.subagent_active.store(false, Ordering::SeqCst);
             println!("\n  --- 🤖 [Hook] Subagent Finished ---");

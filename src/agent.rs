@@ -26,7 +26,17 @@ pub struct AgentConfig {
     /// Optional system instructions (either appended template sections or fully custom text).
     pub system_instructions: Option<SystemInstructions>,
     /// Optional directory to save session state logs.
+    ///
+    /// Defaults to a per-conversation directory under the system temp
+    /// directory, so a harness with nowhere to write does not scatter state
+    /// through the caller's working directory.
     pub save_dir: Option<String>,
+    /// Extra environment variables for the harness process.
+    ///
+    /// Added on top of the environment the harness inherits from this process;
+    /// sent on `InputConfig.env`. Native transport only — a browser has no
+    /// subprocess to give an environment to.
+    pub env: std::collections::HashMap<String, String>,
     /// Configured workspaces. If not provided, defaults to the current working directory.
     pub workspaces: Option<Vec<String>>,
     /// Paths to local folders containing custom skill modules.
@@ -47,6 +57,21 @@ pub struct AgentConfig {
     pub response_schema: Option<String>,
     /// MCP server configurations to connect to external tool servers.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// How the harness retries the model. Unset leaves its own defaults.
+    pub retry_config: Option<crate::types::RetryConfig>,
+    /// What to do when a tool's output is too large for the context.
+    pub tool_output_truncation: Option<crate::types::ToolOutputTruncation>,
+    /// Named subagents the model can delegate to.
+    ///
+    /// Each one's capabilities default to the read-only built-ins, and every
+    /// client-side tool it names must be registered on this agent.
+    pub subagents: Vec<crate::types::SubagentConfig>,
+    /// How the conversation attaches to harness-side session state.
+    ///
+    /// Leave unset for a new conversation. Set `CreateOrResume` when supplying
+    /// a `conversation_id`: without it a current harness attempts a resume and
+    /// fails when the conversation does not exist.
+    pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -57,6 +82,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("capabilities", &self.capabilities)
             .field("system_instructions", &self.system_instructions)
             .field("save_dir", &self.save_dir)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("workspaces", &self.workspaces)
             .field("skills_paths", &self.skills_paths)
             .field("policies", &self.policies)
@@ -67,7 +93,9 @@ impl std::fmt::Debug for AgentConfig {
             .field("app_data_dir", &self.app_data_dir)
             .field("response_schema", &self.response_schema)
             .field("mcp_servers", &self.mcp_servers)
-            .finish()
+            .field("subagents", &self.subagents)
+            .field("session_continuation_mode", &self.session_continuation_mode)
+            .finish_non_exhaustive()
     }
 }
 
@@ -180,7 +208,7 @@ impl Agent<Unstarted> {
     /// - Write tools are enabled but no safety policies are configured.
     /// - The WebSocket upgrade or subprocess connection fails.
     #[allow(clippy::too_many_lines)]
-    pub fn start(self) -> BoxFuture<'static, Result<Agent<Started>, anyhow::Error>> {
+    pub fn start(mut self) -> BoxFuture<'static, Result<Agent<Started>, anyhow::Error>> {
         Box::pin(async move {
             // 1. Resolve binary path
             #[cfg(not(target_arch = "wasm32"))]
@@ -246,6 +274,36 @@ impl Agent<Unstarted> {
             // strategy) all read the one field.
             let workspaces = crate::workspace::resolve(self.config.workspaces.as_ref());
 
+            // Upstream constrains the id (connection.py:100-107): the harness
+            // requires at least 32 characters and rejects anything outside
+            // [a-zA-Z0-9-], which otherwise surfaces as an opaque failure at
+            // connect time.
+            if let Some(ref id) = self.config.conversation_id {
+                if id.len() < 32 {
+                    return Err(anyhow!(
+                        "conversation_id must be at least 32 characters, got {}",
+                        id.len()
+                    ));
+                }
+                if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    return Err(anyhow!(
+                        "conversation_id must contain only [a-zA-Z0-9-], got '{id}'"
+                    ));
+                }
+            }
+
+            // Upstream rejects RESUME without an id at config time
+            // (connection.py:109-117); this crate has no config-validation hook,
+            // so it is checked here.
+            if self.config.session_continuation_mode
+                == Some(crate::types::SessionContinuationMode::Resume)
+                && self.config.conversation_id.is_none()
+            {
+                return Err(anyhow!(
+                    "conversation_id must be specified when session_continuation_mode is Resume"
+                ));
+            }
+
             // 4. Set up policies
             let final_policies = compose_policies(
                 self.config.policies.clone(),
@@ -274,9 +332,16 @@ impl Agent<Unstarted> {
                 self.hook_runner.register(enforcer).await;
             }
 
+            // The environment can select the Vertex backend, which upstream
+            // honours and this crate ignored — a caller whose environment said
+            // Vertex silently got the Gemini API (C3).
+            if !self.config.gemini_config.vertex && crate::harness_config::vertex_from_env() {
+                self.config.gemini_config.vertex = true;
+            }
+
             // 5. Register configured tools
             for tool in &self.config.tools {
-                self.tool_runner.register(tool.clone()).await;
+                self.tool_runner.register(tool.clone()).await?;
             }
 
             // 6. Build and connect strategy
@@ -297,19 +362,33 @@ impl Agent<Unstarted> {
                     tool_runner: Some(self.tool_runner.clone()),
                     hook_runner: Some(self.hook_runner.clone()),
                     conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
+                    mcp_servers: self.config.mcp_servers.clone(),
+                    subagents: self.config.subagents.clone(),
+                    retry_config: self.config.retry_config.clone(),
+                    tool_output_truncation: self.config.tool_output_truncation.clone(),
                 };
 
                 let conn = strategy.connect().await?;
+                // The handshake reply arrives on the reader task here, so this
+                // waits for it rather than reading it inline as the native
+                // transport does.
+                let replayed = conn.initial_history().await;
                 let conversation = Arc::new(Conversation::new(
                     crate::connection::AnyConnection::Wasm(Arc::new(conn)),
                     None,
                 ));
+                conversation.seed_history(replayed).await;
+                self.tool_runner
+                    .set_context(Arc::new(crate::tool_context::ToolContext::new(
+                        conversation.connection().downgrade(),
+                    )))
+                    .await;
 
                 // 7. Start triggers
                 let mut trigger_runner = None;
                 if !self.config.triggers.is_empty() {
                     let runner = TriggerRunner::new(self.config.triggers.clone());
-                    runner.start(&conversation.connection());
+                    runner.start(&conversation.connection())?;
                     trigger_runner = Some(runner);
                 }
 
@@ -342,21 +421,42 @@ impl Agent<Unstarted> {
                     Some(self.tool_runner.clone()),
                     Some(self.hook_runner.clone()),
                     self.config.conversation_id.clone().unwrap_or_default(),
+                    self.config.session_continuation_mode,
                     self.config.mcp_servers.clone(),
                 );
+                let strategy = LocalConnectionStrategy {
+                    env: self.config.env.clone(),
+                    subagents: self.config.subagents.clone(),
+                    retry_config: self.config.retry_config.clone(),
+                    tool_output_truncation: self.config.tool_output_truncation.clone(),
+                    ..strategy
+                };
 
                 let conn = strategy.connect().await?;
+                // A resumed session's history comes back in the handshake reply.
+                // Seeded before the first turn so `history()`, `turn_count()`
+                // and `last_response()` describe the session that was resumed.
+                let replayed = conn.initial_history().to_vec();
                 let conversation = Arc::new(Conversation::new(
                     crate::connection::AnyConnection::Local(Arc::new(conn)),
                     None,
                 ));
+                conversation.seed_history(replayed).await;
+                // Tools that ask for a context can only get one now the
+                // connection exists. Weak, so the runner the connection owns
+                // does not keep the connection alive through this handle.
+                self.tool_runner
+                    .set_context(Arc::new(crate::tool_context::ToolContext::new(
+                        conversation.connection().downgrade(),
+                    )))
+                    .await;
 
                 // 7. Start triggers
                 let trigger_runner = if self.config.triggers.is_empty() {
                     None
                 } else {
                     let runner = TriggerRunner::new(self.config.triggers.clone());
-                    runner.start(&conversation.connection());
+                    runner.start(&conversation.connection())?;
                     Some(runner)
                 };
 
@@ -381,7 +481,32 @@ impl Agent<Started> {
     ///
     /// Returns an error if the execution stream encounters a failure.
     pub async fn chat(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
+        // Upstream rejects an empty prompt rather than sending it (agent.py).
+        // An empty UserInput reaches the harness as a turn with no content, so
+        // the model is asked to respond to nothing and the turn is wasted.
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("prompt must not be empty"));
+        }
         self.state.conversation.chat_to_completion(prompt).await
+    }
+
+    /// Sends a multimodal prompt — text, attachments, slash commands — and
+    /// resolves once the model completes its response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt carries nothing, or if the turn fails.
+    pub async fn chat_content(
+        &self,
+        content: &crate::types::Content,
+    ) -> Result<ChatResponse, anyhow::Error> {
+        if content.is_empty() {
+            return Err(anyhow!("prompt must not be empty"));
+        }
+        self.state
+            .conversation
+            .chat_content_to_completion(content)
+            .await
     }
 
     /// Returns the active [`Conversation`] session.
@@ -400,6 +525,11 @@ impl Agent<Started> {
     ///
     /// Returns an error if closing the connection fails.
     pub async fn stop(&self) -> Result<(), anyhow::Error> {
+        // Before disconnecting: triggers hold a connection handle, and stopping
+        // them afterwards left a background task nudging a dead session.
+        if let Some(ref runner) = self.state.trigger_runner {
+            runner.stop();
+        }
         self.state.conversation.disconnect().await?;
         Ok(())
     }
@@ -469,8 +599,50 @@ impl<P> AgentBuilder<P> {
         self
     }
 
+    /// Sets how the harness retries the model.
+    #[allow(clippy::missing_const_for_fn)] // consistent with every other builder method
+    pub fn retry_config(mut self, retry_config: crate::types::RetryConfig) -> Self {
+        self.config.retry_config = Some(retry_config);
+        self
+    }
+
+    /// Sets what happens when a tool's output is too large for the context.
+    pub fn tool_output_truncation(
+        mut self,
+        truncation: crate::types::ToolOutputTruncation,
+    ) -> Self {
+        self.config.tool_output_truncation = Some(truncation);
+        self
+    }
+
+    /// Declares a named subagent the model can delegate to.
+    pub fn subagent(mut self, subagent: crate::types::SubagentConfig) -> Self {
+        self.config.subagents.push(subagent);
+        self
+    }
+
+    /// Replaces the declared subagents.
+    pub fn subagents(mut self, subagents: Vec<crate::types::SubagentConfig>) -> Self {
+        self.config.subagents = subagents;
+        self
+    }
+
     pub fn save_dir(mut self, save_dir: impl Into<String>) -> Self {
         self.config.save_dir = Some(save_dir.into());
+        self
+    }
+
+    /// Adds environment variables for the harness process.
+    ///
+    /// Merged into whatever was set before, so it can be called more than once.
+    pub fn env<K, V>(mut self, vars: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.config
+            .env
+            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 
@@ -524,6 +696,19 @@ impl<P> AgentBuilder<P> {
         }
     }
 
+    /// Sets how the conversation attaches to harness-side session state.
+    ///
+    /// Pair with [`conversation_id`](Self::conversation_id): a current harness
+    /// refuses a caller-supplied id it has never seen unless this is
+    /// `CreateOrResume`.
+    pub const fn session_continuation_mode(
+        mut self,
+        mode: crate::types::SessionContinuationMode,
+    ) -> Self {
+        self.config.session_continuation_mode = Some(mode);
+        self
+    }
+
     pub fn conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
         self.config.conversation_id = Some(conversation_id.into());
         self
@@ -549,6 +734,35 @@ impl<P> AgentBuilder<P> {
     pub fn mcp_servers(mut self, servers: Vec<McpServerConfig>) -> Self {
         self.config.mcp_servers = servers;
         self
+    }
+
+    /// Sets the policy set from a mix of groups and individual policies.
+    ///
+    /// The group builders return `Vec<Policy>` and the individual ones return a
+    /// `Policy`, so composing them previously meant assembling the vector by
+    /// hand. Upstream flattens nested sequences for the same reason
+    /// (`connection.py:138-159`).
+    ///
+    /// ```no_run
+    /// use antigravity_sdk_rust::{agent::Agent, policy};
+    ///
+    /// let agent = Agent::builder()
+    ///     .policy_groups([
+    ///         policy::workspace_only(vec!["/srv/app".to_string()]),
+    ///         vec![policy::deny("RUN_COMMAND"), policy::allow_all()],
+    ///     ])
+    ///     .build();
+    /// ```
+    pub fn policy_groups<I, G>(self, groups: I) -> AgentBuilder<HasPolicies>
+    where
+        I: IntoIterator<Item = G>,
+        G: crate::policy::IntoPolicies,
+    {
+        let flattened: Vec<Policy> = groups
+            .into_iter()
+            .flat_map(crate::policy::IntoPolicies::into_policies)
+            .collect();
+        self.policies(flattened)
     }
 
     pub fn policies(self, policies: Vec<Policy>) -> AgentBuilder<HasPolicies> {
@@ -595,7 +809,6 @@ impl AgentBuilder<HasPolicies> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Builds the effective policy list for an agent.
 ///
 /// Extracted from `Agent::start` so the composition can be tested without a
@@ -664,6 +877,7 @@ fn compose_policies(
     Ok(final_policies)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_default_binary_path() -> Option<String> {
     if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         return Some(path);
@@ -824,6 +1038,7 @@ mod tests {
             name: "VIEW_FILE".to_string(),
             args: serde_json::json!({}),
             canonical_path: Some("/app-data/state.json".to_string()),
+            server_name: None,
         };
         // `when` is "is outside the workspace", so false means allowed.
         assert!(!scoped(&inside_app_data));

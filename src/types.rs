@@ -14,18 +14,198 @@ pub const DEFAULT_MODEL: &str = "gemini-3.5-flash";
 /// The default image generation model name used.
 pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gemini-3.1-flash-image-preview";
 
-/// Configures the intensity of the reasoning/thinking process for models that support it.
+/// How a conversation attaches to harness-side session state.
+///
+/// Mirrors upstream `SessionContinuationMode` (`types.py:654-664`, added 0.1.7).
+///
+/// This matters whenever a `conversation_id` is supplied: with the field unset,
+/// a 0.1.9 harness attempts a resume and **fails** if the conversation does not
+/// exist ("conversation ... not found (cannot resume)"). `CreateOrResume` is
+/// what makes a caller-chosen id work for both a new and an existing session.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
+pub enum SessionContinuationMode {
+    /// Resume an existing conversation; error if it does not exist.
+    Resume,
+    /// Resume if it exists, otherwise create it.
+    CreateOrResume,
+    /// Always create; error if the conversation already exists.
+    CreateOnly,
+}
+
+impl SessionContinuationMode {
+    /// The proto enum value (`HarnessConfig.SessionContinuationMode`).
+    #[must_use]
+    pub const fn as_proto(self) -> i32 {
+        match self {
+            Self::Resume => 1,
+            Self::CreateOrResume => 2,
+            Self::CreateOnly => 3,
+        }
+    }
+}
+
+/// Configures the intensity of the reasoning/thinking process for models that support it.
+///
+/// The wire spelling is per-variant, not `rename_all = "lowercase"`: that would
+/// emit `extrahigh` for [`ExtraHigh`](Self::ExtraHigh), which the harness does
+/// not recognise.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThinkingLevel {
     /// Minimal reasoning overhead.
+    #[serde(rename = "minimal")]
     Minimal,
     /// Low reasoning.
+    #[serde(rename = "low")]
     Low,
     /// Medium reasoning.
+    #[serde(rename = "medium")]
     Medium,
     /// High reasoning.
+    #[serde(rename = "high")]
     High,
+    /// The highest reasoning budget (added upstream in 0.1.7).
+    #[serde(rename = "extra_high")]
+    ExtraHigh,
+}
+
+impl ThinkingLevel {
+    /// The wire spelling the harness expects.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "extra_high",
+        }
+    }
+}
+
+/// What a model is used for.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    /// Text and reasoning.
+    Text,
+    /// Image generation.
+    Image,
+}
+
+impl ModelType {
+    /// The proto enum value (`ModelType`).
+    #[must_use]
+    pub const fn as_proto(self) -> i32 {
+        match self {
+            Self::Text => 1,
+            Self::Image => 2,
+        }
+    }
+}
+
+/// Per-model generation options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GeminiModelOptions {
+    /// Reasoning budget for models that support it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
+impl GeminiModelOptions {
+    /// Whether every option is unset.
+    ///
+    /// Upstream omits the `options` sub-message entirely in that case rather
+    /// than sending an empty object (`local_connection.py:140-146`).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.thinking_level.is_none()
+    }
+}
+
+/// Where a model is served from.
+///
+/// Mirrors upstream's `ModelEndpoint` hierarchy (`models.py:73-128`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEndpoint {
+    /// The Gemini Developer API.
+    GeminiApi {
+        /// Overrides the default endpoint host.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        /// Extra headers to send with every request.
+        #[serde(default)]
+        http_headers: std::collections::HashMap<String, String>,
+        /// An explicit key.
+        ///
+        /// Leave unset to let the harness read `GEMINI_API_KEY` from the
+        /// environment it inherits — that is what upstream does, and it keeps
+        /// the key out of the config frame.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+        /// Generation options.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        options: Option<GeminiModelOptions>,
+    },
+    /// Vertex AI.
+    Vertex {
+        /// Overrides the default endpoint host.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        /// Extra headers to send with every request.
+        #[serde(default)]
+        http_headers: std::collections::HashMap<String, String>,
+        /// GCP project.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// GCP location.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        location: Option<String>,
+        /// Generation options.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        options: Option<GeminiModelOptions>,
+    },
+    /// An OpenAI-compatible backend (Ollama, LM Studio).
+    Gemma {
+        /// The backend's base URL.
+        base_url: String,
+    },
+}
+
+/// One model the agent may use, and where it is served from.
+///
+/// Mirrors upstream's `ModelTarget` (`models.py:131-138`). `name` is optional
+/// and an empty name is meaningful, not an error: the backend then chooses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelTarget {
+    /// The model identifier, or `None` to let the backend choose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What this model is used for. Defaults to text.
+    #[serde(default = "default_model_types")]
+    pub types: Vec<ModelType>,
+    /// Where it is served from.
+    ///
+    /// Required on an explicitly-supplied target: the shorthand endpoint built
+    /// from `api_key`/`vertex` attaches to the shorthand and default models
+    /// only, never to an explicit one (`local_connection.py:1060-1073`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<ModelEndpoint>,
+}
+
+fn default_model_types() -> Vec<ModelType> {
+    vec![ModelType::Text]
+}
+
+impl Default for ModelTarget {
+    fn default() -> Self {
+        Self {
+            name: None,
+            types: default_model_types(),
+            endpoint: None,
+        }
+    }
 }
 
 /// Generation configuration parameters.
@@ -110,15 +290,133 @@ pub struct GeminiConfig {
     /// GCP Location/Region for Vertex AI (e.g., "us-central1").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
-    /// Model configurations.
+    /// Model configurations, in the crate's shorthand form.
     #[serde(default)]
     pub models: ModelConfig,
+    /// Explicit model targets, upstream's `models` list.
+    ///
+    /// Named `model_targets` because `models` is already taken by the
+    /// shorthand above. Entries here come first on the wire; the shorthand and
+    /// the defaults are appended only for model types these do not already
+    /// cover (`local_connection_config.py:268-296`).
+    #[serde(default)]
+    pub model_targets: Vec<ModelTarget>,
     /// Option to enable Google Search grounding tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_google_search: Option<bool>,
     /// Option to enable URL context resolution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_url_context: Option<bool>,
+}
+
+/// What a named subagent may do.
+///
+/// Mirrors upstream `SubagentCapabilities` (`types.py:785-802`). The two lists
+/// are mutually exclusive — supplying both is a configuration error, not a
+/// silent precedence rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubagentCapabilities {
+    /// Built-ins the subagent may use. Defaults to
+    /// [`BuiltinTools::read_only`] when neither list is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<BuiltinTools>>,
+    /// Built-ins the subagent may not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_tools: Option<Vec<BuiltinTools>>,
+}
+
+/// A named subagent the model can delegate to.
+///
+/// Mirrors upstream `SubagentConfig` (`types.py:804-834`), emitted on
+/// `HarnessConfig.custom_subagents` (field 17).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    /// How the model refers to this subagent.
+    pub name: String,
+    /// What it is for. The model reads this to decide when to delegate.
+    pub description: String,
+    /// Instructions scoped to this subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_instructions: Option<String>,
+    /// Which built-ins it may use.
+    #[serde(default)]
+    pub capabilities: SubagentCapabilities,
+    /// Names of client-side tools it may call.
+    ///
+    /// Each must be registered on the main agent — a subagent cannot call a
+    /// tool that does not exist.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+/// How the harness retries the model.
+///
+/// Mirrors upstream `RetryConfig` (`types.py:355-417`). Emitted only when a
+/// sub-config is populated: an all-empty message would override the harness's
+/// own defaults with zeros.
+// `ApiRetryConfig` carries floats, so `Eq` is not available on this graph.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RetryConfig {
+    /// Retries for transport and API failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_retry: Option<ApiRetryConfig>,
+    /// Retries for a model response the harness could not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_output_retry: Option<ModelOutputRetryConfig>,
+}
+
+impl RetryConfig {
+    /// Whether nothing is configured, in which case the field is omitted.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.api_retry.is_none() && self.model_output_retry.is_none()
+    }
+}
+
+/// Retry policy for model API calls.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiRetryConfig {
+    /// How many times to retry before giving up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// How long to wait before the first retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_sleep_duration_ms: Option<u32>,
+    /// Backoff growth factor between attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exponential_multiplier: Option<f64>,
+    /// Random spread applied to each wait, to avoid synchronised retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_range: Option<f64>,
+}
+
+/// Retry policy for unusable model output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelOutputRetryConfig {
+    /// How many times to ask again before giving up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+/// What to do when a tool's output is too large for the context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputTruncation {
+    /// Cut the output down and carry on.
+    Truncate {
+        /// The budget to cut to.
+        max_tokens: i32,
+    },
+    /// Fail the tool call instead, with a message the model can act on.
+    Error {
+        /// The budget above which the call fails.
+        max_tokens: i32,
+        /// What the model is told.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_message: Option<String>,
+    },
 }
 
 /// A structured section appended to system instructions.
@@ -188,6 +486,15 @@ pub enum BuiltinTools {
     /// Tool to generate images from descriptions.
     #[serde(rename = "GENERATE_IMAGE")]
     GenerateImage,
+    /// Tool to put a multiple-choice question to the user.
+    #[serde(rename = "ASK_QUESTION")]
+    AskQuestion,
+    /// Tool to search the web (harness-side, added upstream in 0.1.6).
+    #[serde(rename = "SEARCH_WEB")]
+    SearchWeb,
+    /// Tool to fetch and summarize a URL (harness-side, added upstream in 0.1.6).
+    #[serde(rename = "READ_URL_CONTENT")]
+    ReadUrlContent,
     /// Terminating signal indicating the task is completed.
     #[serde(rename = "FINISH")]
     Finish,
@@ -206,6 +513,9 @@ impl BuiltinTools {
             Self::ViewFile => "VIEW_FILE",
             Self::StartSubagent => "START_SUBAGENT",
             Self::GenerateImage => "GENERATE_IMAGE",
+            Self::AskQuestion => "ASK_QUESTION",
+            Self::SearchWeb => "SEARCH_WEB",
+            Self::ReadUrlContent => "READ_URL_CONTENT",
             Self::Finish => "FINISH",
         }
     }
@@ -222,6 +532,9 @@ impl BuiltinTools {
             Self::SearchDir,
             Self::FindFile,
             Self::ViewFile,
+            // Added to upstream's read_only() in 0.1.6: fetching a URL reads,
+            // it does not write.
+            Self::ReadUrlContent,
             Self::Finish,
         ]
     }
@@ -242,6 +555,9 @@ impl BuiltinTools {
             Self::ViewFile,
             Self::StartSubagent,
             Self::GenerateImage,
+            Self::AskQuestion,
+            Self::SearchWeb,
+            Self::ReadUrlContent,
             Self::Finish,
         ]
     }
@@ -314,6 +630,13 @@ pub enum McpServerConfig {
         command: String,
         /// execution arguments.
         args: Vec<String>,
+        /// Extra environment for the server process, on top of what it
+        /// inherits.
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// How long the harness waits for the server before giving up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<i32>,
         /// Explicit allowlist of tools to enable. Mutually exclusive with `disabled_tools`.
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled_tools: Option<Vec<String>>,
@@ -328,6 +651,9 @@ pub enum McpServerConfig {
         name: String,
         /// HTTP URL endpoint.
         url: String,
+        /// How long the harness waits for the server before giving up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<i32>,
         /// Additional HTTP headers.
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
@@ -404,7 +730,7 @@ const fn default_true() -> bool {
 }
 
 /// Describes a model's request to execute a registered tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Unique call ID generated for correlation.
     pub id: String,
@@ -415,10 +741,17 @@ pub struct ToolCall {
     /// Canonical file system path (if the tool targets a file/directory).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_path: Option<String>,
+    /// The MCP server this tool belongs to, if any.
+    ///
+    /// `None` for a built-in or a client-side Rust tool. A policy predicate
+    /// could not tell `github/create_issue` from a local `create_issue`
+    /// without it — the name alone is ambiguous across servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 /// The response outcome of executing a client-side tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Name of the executed tool.
     pub name: String,
@@ -431,23 +764,33 @@ pub struct ToolResult {
     /// Error message string if tool execution failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The MCP server that ran the tool, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    /// The failure in structured form, when there was one.
+    ///
+    /// `error` is the message shown to the model; this carries what a
+    /// `post_tool_call` hook needs to route or count failures without parsing
+    /// prose. Not serialized to the wire — the harness only takes the message.
+    #[serde(skip)]
+    pub exception: Option<crate::error::ToolExecutionError>,
 }
 
 /// Consumption stats for API usage tracking.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageMetadata {
     /// Tokens included in the request prompt.
-    pub prompt_token_count: i32,
+    pub prompt_token_count: u64,
     /// Tokens generated in candidates.
-    pub candidates_token_count: i32,
+    pub candidates_token_count: u64,
     /// Total combined tokens.
-    pub total_token_count: i32,
+    pub total_token_count: u64,
     /// Cache hit content tokens.
     #[serde(default)]
-    pub cached_content_token_count: i32,
+    pub cached_content_token_count: u64,
     /// Tokens consumed during inner thinking/reasoning.
     #[serde(default)]
-    pub thoughts_token_count: i32,
+    pub thoughts_token_count: u64,
 }
 
 /// The classification type of a step in the trajectory.
@@ -665,8 +1008,13 @@ pub struct ChatResponse {
     pub thinking: String,
     /// Sequence of intermediate execution steps.
     pub steps: Vec<Step>,
-    /// Token usage metrics.
-    pub usage_metadata: UsageMetadata,
+    /// Token usage for **this turn**, or `None` when the harness reported none.
+    ///
+    /// Was the session's running total, which made it impossible to answer
+    /// "what did this reply cost" — the number a caller reaches for. The
+    /// cumulative figure is still available as
+    /// [`Conversation::total_usage`](crate::conversation::Conversation::total_usage).
+    pub usage_metadata: Option<UsageMetadata>,
 }
 
 /// Streaming fragment sent over chunk-based event listeners.
@@ -905,6 +1253,8 @@ pub enum ContentPrimitive {
     Text(String),
     /// Binary media content (image, document, audio, or video).
     Media(Media),
+    /// A slash command for the harness to expand, without the leading slash.
+    SlashCommand(String),
 }
 
 /// Agent prompt content — a single primitive or a list of primitives.
@@ -921,6 +1271,38 @@ pub enum Content {
 }
 
 impl Content {
+    /// The parts, in order, whichever shape this is.
+    #[must_use]
+    pub fn parts(&self) -> Vec<&ContentPrimitive> {
+        match self {
+            Self::Single(part) => vec![part],
+            Self::Multi(parts) => parts.iter().collect(),
+        }
+    }
+
+    /// Whether the prompt carries nothing the harness could act on.
+    ///
+    /// An empty multimodal prompt is rejected the same as an empty string.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts().into_iter().all(|part| match part {
+            ContentPrimitive::Text(text) => text.trim().is_empty(),
+            ContentPrimitive::Media(media) => media.data.is_empty(),
+            ContentPrimitive::SlashCommand(name) => name.trim().is_empty(),
+        })
+    }
+
+    /// Appends a slash command.
+    #[must_use]
+    pub fn with_slash_command(self, name: impl Into<String>) -> Self {
+        let mut parts: Vec<ContentPrimitive> = match self {
+            Self::Single(part) => vec![part],
+            Self::Multi(parts) => parts,
+        };
+        parts.push(ContentPrimitive::SlashCommand(name.into()));
+        Self::Multi(parts)
+    }
+
     /// Creates a text-only content.
     pub fn text(s: impl Into<String>) -> Self {
         Self::Single(ContentPrimitive::Text(s.into()))
@@ -1066,6 +1448,7 @@ mod tests {
             name: "read_file".to_string(),
             args: json!({"path": "/tmp/foo"}),
             canonical_path: None,
+            server_name: None,
         };
         assert_eq!(tc.name, "read_file");
         assert_eq!(tc.args["path"], "/tmp/foo");
@@ -1090,6 +1473,8 @@ mod tests {
             id: Some("call_1".to_string()),
             result: Some(json!(42)),
             error: None,
+            server_name: None,
+            exception: None,
         };
         assert_eq!(tr.name, "sum_tool");
         assert_eq!(tr.result.unwrap(), 42);
@@ -1104,6 +1489,8 @@ mod tests {
             id: None,
             result: None,
             error: Some("kaboom".to_string()),
+            server_name: None,
+            exception: None,
         };
         assert_eq!(tr.name, "bad_tool");
         assert!(tr.result.is_none());
@@ -1118,6 +1505,8 @@ mod tests {
             id: None,
             result: None,
             error: None,
+            server_name: None,
+            exception: None,
         };
         tr.result = Some(json!("updated"));
         assert_eq!(tr.result.unwrap(), "updated");

@@ -1,0 +1,10 @@
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/typed_builder_macro-553e68c3f7b01b3d.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/builder_attr.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/field_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/mutator.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/struct_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/util.rs
+
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/libtyped_builder_macro-553e68c3f7b01b3d.so: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/builder_attr.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/field_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/mutator.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/struct_info.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/util.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/builder_attr.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/field_info.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/mutator.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/struct_info.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/typed-builder-macro-0.23.2/src/util.rs:

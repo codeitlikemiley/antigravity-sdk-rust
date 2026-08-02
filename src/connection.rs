@@ -20,6 +20,13 @@ pub trait Connection: Send + Sync {
     /// Returns whether the connection is currently idle.
     fn is_idle(&self) -> bool;
 
+    /// Resolves once the connection is idle.
+    ///
+    /// Returns immediately if it already is. Callers that need to know a turn
+    /// has finished previously had to poll `is_idle()` in a sleep loop, which
+    /// is both slower to notice and easy to write as a busy wait.
+    fn wait_for_idle(&self) -> impl std::future::Future<Output = ()> + Send;
+
     /// Subscribes to the stream of step updates from the connection.
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>>;
 
@@ -27,6 +34,15 @@ pub trait Connection: Send + Sync {
     fn send(
         &self,
         content: &str,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
+
+    /// Sends a multimodal prompt — text, attachments, slash commands.
+    ///
+    /// Goes out as `complex_user_input`; the plain `send` field is a bare
+    /// string and cannot carry either.
+    fn send_content(
+        &self,
+        content: &crate::types::Content,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
     /// Sends a trigger notification message to the connection.
@@ -78,6 +94,60 @@ pub enum AnyConnection {
     Mock(std::sync::Arc<MockConnection>),
 }
 
+/// A non-owning handle to a connection.
+///
+/// The tool runner is owned by the connection, and a [`ToolContext`] handed to
+/// a tool points back at that connection — holding it strongly would make a
+/// reference cycle that never frees the session. Tools upgrade on use and see
+/// `None` once the agent has stopped.
+///
+/// [`ToolContext`]: crate::tool_context::ToolContext
+#[derive(Clone)]
+pub enum WeakConnection {
+    #[cfg(not(target_arch = "wasm32"))]
+    Local(std::sync::Weak<crate::local::LocalConnection>),
+    #[cfg(target_arch = "wasm32")]
+    Wasm(std::sync::Weak<crate::wasm::WasmConnection>),
+    #[cfg(test)]
+    Mock(std::sync::Weak<MockConnection>),
+}
+
+impl std::fmt::Debug for WeakConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WeakConnection")
+    }
+}
+
+impl WeakConnection {
+    /// Returns a live connection, or `None` if the session has ended.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<AnyConnection> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.upgrade().map(AnyConnection::Local),
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.upgrade().map(AnyConnection::Wasm),
+            #[cfg(test)]
+            Self::Mock(c) => c.upgrade().map(AnyConnection::Mock),
+        }
+    }
+}
+
+impl AnyConnection {
+    /// Produces a non-owning handle to this connection.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakConnection {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => WeakConnection::Local(std::sync::Arc::downgrade(c)),
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => WeakConnection::Wasm(std::sync::Arc::downgrade(c)),
+            #[cfg(test)]
+            Self::Mock(c) => WeakConnection::Mock(std::sync::Arc::downgrade(c)),
+        }
+    }
+}
+
 impl std::fmt::Debug for AnyConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -114,6 +184,17 @@ impl Connection for AnyConnection {
         }
     }
 
+    async fn wait_for_idle(&self) {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.wait_for_idle().await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.wait_for_idle().await,
+            #[cfg(test)]
+            Self::Mock(c) => c.wait_for_idle().await,
+        }
+    }
+
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -133,6 +214,17 @@ impl Connection for AnyConnection {
             Self::Wasm(c) => c.send(content).await,
             #[cfg(test)]
             Self::Mock(c) => c.send(content).await,
+        }
+    }
+
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.send_content(content).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.send_content(content).await,
+            #[cfg(test)]
+            Self::Mock(c) => c.send_content(content).await,
         }
     }
 
@@ -262,6 +354,20 @@ impl MockConnection {
             sent_prompts: std::sync::Mutex::new(Vec::new()),
         }
     }
+
+    /// Queues the steps `receive_steps()` will yield.
+    pub fn set_steps(&self, steps: Vec<Step>) {
+        *self
+            .steps_to_yield
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = steps;
+    }
+
+    /// Sets what `is_idle()` reports.
+    pub fn set_idle(&self, idle: bool) {
+        self.is_idle
+            .store(idle, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -272,6 +378,12 @@ impl Connection for MockConnection {
 
     fn is_idle(&self) -> bool {
         self.is_idle.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn wait_for_idle(&self) {
+        while !self.is_idle() {
+            tokio::task::yield_now().await;
+        }
     }
 
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
@@ -293,6 +405,19 @@ impl Connection for MockConnection {
 
     async fn send_trigger_notification(&self, _content: &str) -> Result<(), anyhow::Error> {
         Ok(())
+    }
+
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        let text = content
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                crate::types::ContentPrimitive::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.send(&text).await
     }
 
     async fn send_halt_request(&self) -> Result<(), anyhow::Error> {

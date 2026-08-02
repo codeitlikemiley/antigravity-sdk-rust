@@ -24,8 +24,9 @@ use antigravity_sdk_rust::types::{AskQuestionEntry, HookResult, QuestionHookResu
 
 pub trait Hook: Send + Sync {
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(
-        &self,
+    fn on_session_start<'a>(
+        &'a self,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -48,6 +49,7 @@ pub trait Hook: Send + Sync {
     fn pre_tool_call<'a>(
         &'a self,
         _tool_call: &'a ToolCall,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
         async {
             Ok(HookResult {
@@ -61,27 +63,20 @@ pub trait Hook: Send + Sync {
     fn post_tool_call<'a>(
         &'a self,
         _result: &'a ToolResult,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
 
-    /// Triggered when a tool execution encounters an error.
-    /// Allows fallback logic or customized error payloads.
+    /// Triggered when a tool execution fails; may reword the error.
     fn on_tool_error<'a>(
         &'a self,
-        error: &'a anyhow::Error,
-    ) -> impl std::future::Future<
-        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
-    > + Send {
-        async move {
-            Ok((
-                HookResult {
-                    allow: false,
-                    message: error.to_string(),
-                },
-                None,
-            ))
-        }
+        _error: &'a anyhow::Error,
+        context: &'a HookContext,
+    ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
+        // `Some(message)` replaces the error text shown to the model;
+        // `None` leaves it. A failure cannot be turned into a success.
+        async { Ok(None) }
     }
 
     /// Intercepts a prompt to ask the user clarifying questions.
@@ -130,19 +125,13 @@ impl Hook for DiagnosticLogger {
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
-    ) -> impl std::future::Future<
-        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
-    > + Send {
+        context: &'a HookContext,
+    ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
         async move {
             eprintln!("[HOOK ERROR] Tool failed: {}", error);
-            // Custom telemetry or recovery logic can go here
-            Ok((
-                HookResult {
-                    allow: false,
-                    message: error.to_string(),
-                },
-                None,
-            ))
+            // Telemetry, or reword the failure into something the model can act
+            // on. The tool still failed either way.
+            Ok(None)
         }
     }
 }

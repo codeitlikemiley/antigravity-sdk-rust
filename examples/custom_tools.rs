@@ -1,5 +1,6 @@
 use antigravity_sdk_rust::agent::Agent;
 use antigravity_sdk_rust::policy;
+use antigravity_sdk_rust::tool_context::ToolContext;
 use antigravity_sdk_rust::tools::Tool;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -106,6 +107,50 @@ impl Tool for RecordFruitTool {
     }
 }
 
+/// A tool that keeps its state in the session rather than in the process.
+///
+/// `needs_context()` is the opt-in; `call_with_context` then receives the
+/// session-scoped [`ToolContext`]. `update_state` is a read-modify-write under
+/// one lock, so two of these running concurrently cannot lose a count.
+struct CallCounterTool;
+
+impl Tool for CallCounterTool {
+    fn name(&self) -> &'static str {
+        "count_requests"
+    }
+
+    fn description(&self) -> &'static str {
+        "Reports how many times it has been called during this session."
+    }
+
+    fn parameters_json_schema(&self) -> &'static str {
+        r#"{"type": "object", "properties": {}}"#
+    }
+
+    async fn call(&self, _args: Value) -> Result<Value, anyhow::Error> {
+        // Never reached: a needs_context tool called without a context is an
+        // error result, not a silent fallback to this path.
+        Err(anyhow::anyhow!("count_requests requires a ToolContext"))
+    }
+
+    fn needs_context(&self) -> bool {
+        true
+    }
+
+    async fn call_with_context(
+        &self,
+        _args: Value,
+        context: &ToolContext,
+    ) -> Result<Value, anyhow::Error> {
+        context.update_state::<u32, _>("calls", |current| Some(current.unwrap_or(0) + 1));
+        let calls: u32 = context.get_state("calls").unwrap_or(0);
+        let conversation = context.conversation_id().unwrap_or_default();
+        Ok(Value::String(format!(
+            "called {calls} time(s) in conversation {conversation}"
+        )))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // Initialize tracing subscriber
@@ -145,11 +190,13 @@ async fn main() -> Result<(), anyhow::Error> {
             Arc::new(RecordFruitTool {
                 inventory: inventory.clone(),
             }),
+            Arc::new(CallCounterTool),
         ])
         .policies(vec![
             policy::deny_all(),
             policy::allow("lookup_fruit_sku"),
             policy::allow("record_fruit"),
+            policy::allow("count_requests"),
         ])
         .build();
 
@@ -176,6 +223,15 @@ async fn main() -> Result<(), anyhow::Error> {
     for user_input in turns {
         println!("\n  User: {}", user_input);
         let response = agent.chat(user_input).await?;
+        println!("  Agent: {}", response.text);
+    }
+
+    // Context-aware tool: its state lives in the session, not in this process.
+    println!("\n  === Context-Aware Tool Demo ===");
+    for _ in 0..2 {
+        let prompt = "Call count_requests and tell me exactly what it returned.";
+        println!("\n  User: {}", prompt);
+        let response = agent.chat(prompt).await?;
         println!("  Agent: {}", response.text);
     }
 

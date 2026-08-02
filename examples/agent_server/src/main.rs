@@ -89,6 +89,7 @@ impl Hook for ConfirmHook {
     async fn pre_tool_call<'a>(
         &'a self,
         tool_call: &'a ToolCall,
+        _context: &'a antigravity_sdk_rust::context::HookContext,
     ) -> Result<HookResult, anyhow::Error> {
         // Always approve non-write tools immediately.
         if !WRITE_TOOLS.contains(&tool_call.name.as_str()) {

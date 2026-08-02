@@ -1,0 +1,1 @@
+cargo:rustc-env=RUSTC_VERSION=/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc

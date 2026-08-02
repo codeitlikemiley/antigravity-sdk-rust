@@ -80,6 +80,36 @@ impl Policy {
     }
 }
 
+/// Anything that can be flattened into a list of policies.
+///
+/// Upstream accepts nested sequences and flattens them in a validator
+/// (`connection.py:138-159`), which is why every group builder there composes
+/// inline. This crate's group builders return `Vec<Policy>` while the agent
+/// builder took a flat `Vec`, so mixing a group with a scalar meant building
+/// the vector by hand. See [`crate::agent::AgentBuilder::policy_groups`].
+pub trait IntoPolicies {
+    /// Consumes self into a policy list.
+    fn into_policies(self) -> Vec<Policy>;
+}
+
+impl IntoPolicies for Policy {
+    fn into_policies(self) -> Vec<Policy> {
+        vec![self]
+    }
+}
+
+impl IntoPolicies for Vec<Policy> {
+    fn into_policies(self) -> Vec<Policy> {
+        self
+    }
+}
+
+impl<const N: usize> IntoPolicies for [Policy; N] {
+    fn into_policies(self) -> Vec<Policy> {
+        self.into()
+    }
+}
+
 /// Helper constructor to approve a specific tool invocation unconditionally.
 pub fn allow(tool: &str) -> Policy {
     Policy::new(
@@ -159,6 +189,21 @@ pub fn confirm_run_command(
             ]
         },
     )
+}
+
+/// Creates a safe default policy set: every read-only tool is approved, and
+/// anything else asks the user.
+///
+/// Mirrors upstream `safe_defaults()` (`policy.py:371-384` at 0.1.1). Note the
+/// ordering — the specific APPROVE rules sit in a higher-priority bucket than
+/// the trailing wildcard `ASK_USER`, so a read-only tool is never prompted for.
+pub fn safe_defaults(handler: impl Fn(&ToolCall) -> bool + Send + Sync + 'static) -> Vec<Policy> {
+    let mut policies: Vec<Policy> = crate::types::BuiltinTools::read_only()
+        .iter()
+        .map(|tool| allow(tool.as_str()))
+        .collect();
+    policies.push(ask_user("*", handler));
+    policies
 }
 
 /// Creates a set of policies restricting file system tools to the given
@@ -376,7 +421,11 @@ fn matches_target(policy_tool: &str, call_target: &str, is_mcp: bool) -> bool {
 }
 
 impl Hook for PolicyEnforcer {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(
+        &self,
+        tool_call: &ToolCall,
+        _context: &crate::context::HookContext,
+    ) -> Result<HookResult, anyhow::Error> {
         // Parse MCP tool name once for all policy evaluations.
         let (call_target, is_mcp) = match self.parse_mcp_tool(&tool_call.name) {
             Some((server, tool)) => (format!("{server}/{tool}"), true),
@@ -502,6 +551,19 @@ pub fn ask_user_mcp(
 }
 
 /// Internal helper for generating MCP policies.
+/// Builds the policy group for an MCP server target.
+///
+/// To attach a predicate or a custom name — upstream's `when` and `name`
+/// arguments (`policy.py:173,187`) — map over the returned group with
+/// [`Policy::when`] / [`Policy::with_name`], which avoids widening three public
+/// signatures for options most callers do not pass:
+///
+/// ```ignore
+/// let policies: Vec<Policy> = policy::deny_mcp(&server, None)
+///     .into_iter()
+///     .map(|p| p.with_name("no_writes").when(|tc| tc.name.ends_with("_write")))
+///     .collect();
+/// ```
 fn mcp_policies(
     server_name: &str,
     decision: Decision,
@@ -534,9 +596,16 @@ fn mcp_policies(
     }
 }
 
+/// The lowercased decision name used in generated policy names.
+///
+/// Mirrors upstream's `decision.value.lower()` (`policy.py:173,187`), whose
+/// `Decision.APPROVE` yields `approve` — this crate previously emitted `allow`,
+/// so a generated name did not match the one upstream's tests pin. The name
+/// reaches tracing and `Debug` output, not user-facing denial messages, which
+/// take the policy's `message` instead.
 const fn decision_label(d: Decision) -> &'static str {
     match d {
-        Decision::Approve => "allow",
+        Decision::Approve => "approve",
         Decision::Deny => "deny",
         Decision::AskUser => "ask_user",
     }
@@ -568,6 +637,7 @@ mod tests {
             name: name.to_string(),
             args,
             canonical_path,
+            server_name: None,
         }
     }
 
@@ -644,7 +714,10 @@ mod tests {
     async fn test_specific_deny_overrides_wildcard_allow() {
         let enforcer = enforce(vec![allow_all(), deny("dangerous_tool")], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("dangerous_tool", json!({})))
+            .pre_tool_call(
+                &make_tool_call("dangerous_tool", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -654,7 +727,10 @@ mod tests {
     async fn test_specific_deny_overrides_specific_allow() {
         let enforcer = enforce(vec![allow("run_command"), deny("run_command")], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -664,7 +740,10 @@ mod tests {
     async fn test_specific_ask_overrides_wildcard_deny() {
         let enforcer = enforce(vec![deny_all(), ask_user("run_command", |_| true)], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -675,13 +754,19 @@ mod tests {
         let enforcer = enforce(vec![deny_all(), allow("read_file")], None).unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("read_file", json!({})))
+            .pre_tool_call(
+                &make_tool_call("read_file", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -691,7 +776,10 @@ mod tests {
     async fn test_wildcard_deny_blocks_unmatched_tools() {
         let enforcer = enforce(vec![deny_all()], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("anything", json!({})))
+            .pre_tool_call(
+                &make_tool_call("anything", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -701,7 +789,10 @@ mod tests {
     async fn test_wildcard_ask_user() {
         let enforcer = enforce(vec![ask_user("*", |_| false)], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .pre_tool_call(
+                &make_tool_call("any_tool", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -711,7 +802,10 @@ mod tests {
     async fn test_wildcard_allow() {
         let enforcer = enforce(vec![allow_all()], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .pre_tool_call(
+                &make_tool_call("any_tool", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -742,7 +836,10 @@ mod tests {
         .unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -770,7 +867,10 @@ mod tests {
         .unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("read_file", json!({})))
+            .pre_tool_call(
+                &make_tool_call("read_file", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -789,7 +889,10 @@ mod tests {
         .unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -811,7 +914,10 @@ mod tests {
         .unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -833,7 +939,10 @@ mod tests {
         .unwrap();
 
         let res = enforcer
-            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .pre_tool_call(
+                &make_tool_call("run_command", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -845,7 +954,10 @@ mod tests {
     async fn test_no_matching_policy_allows() {
         let enforcer = enforce(vec![deny("other_tool")], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("unrelated_tool", json!({})))
+            .pre_tool_call(
+                &make_tool_call("unrelated_tool", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -855,7 +967,10 @@ mod tests {
     async fn test_empty_policies_allows_all() {
         let enforcer = enforce(vec![], None).unwrap();
         let res = enforcer
-            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .pre_tool_call(
+                &make_tool_call("any_tool", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -870,11 +985,17 @@ mod tests {
             "VIEW_FILE",
             json!({"path": "/allowed/workspace/subdir/file.rs"}),
         );
-        let res1 = enforcer.pre_tool_call(&tc1).await.unwrap();
+        let res1 = enforcer
+            .pre_tool_call(&tc1, &crate::context::HookContext::new())
+            .await
+            .unwrap();
         assert!(res1.allow);
 
         let tc2 = make_tool_call("VIEW_FILE", json!({"path": "/forbidden/path/file.rs"}));
-        let res2 = enforcer.pre_tool_call(&tc2).await.unwrap();
+        let res2 = enforcer
+            .pre_tool_call(&tc2, &crate::context::HookContext::new())
+            .await
+            .unwrap();
         assert!(!res2.allow);
     }
 
@@ -893,7 +1014,10 @@ mod tests {
             "/allowed/workspace/sub/../../../etc/shadow",
         ] {
             let tc = make_tool_call("VIEW_FILE", json!({ "path": escape }));
-            let res = enforcer.pre_tool_call(&tc).await.unwrap();
+            let res = enforcer
+                .pre_tool_call(&tc, &crate::context::HookContext::new())
+                .await
+                .unwrap();
             assert!(!res.allow, "escape should be denied: {escape}");
         }
 
@@ -902,7 +1026,10 @@ mod tests {
             "VIEW_FILE",
             json!({"path": "/allowed/workspace/sub/../file.rs"}),
         );
-        let res = enforcer.pre_tool_call(&inside).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&inside, &crate::context::HookContext::new())
+            .await
+            .unwrap();
         assert!(res.allow);
     }
 
@@ -913,7 +1040,13 @@ mod tests {
     async fn test_workspace_only_with_no_roots_denies() {
         let enforcer = enforce(workspace_only(vec![]), None).unwrap();
         let tc = make_tool_call("VIEW_FILE", json!({"path": "/anywhere/file.rs"}));
-        assert!(!enforcer.pre_tool_call(&tc).await.unwrap().allow);
+        assert!(
+            !enforcer
+                .pre_tool_call(&tc, &crate::context::HookContext::new())
+                .await
+                .unwrap()
+                .allow
+        );
     }
 
     #[tokio::test]
@@ -924,6 +1057,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let mut policies = deny_mcp(&server, None); // "math/*" deny
         policies.push(allow_all());
@@ -931,14 +1066,20 @@ mod tests {
 
         // MCP tool "mcp_math_add" should be denied by "math/*" prefix
         let res = enforcer
-            .pre_tool_call(&make_tool_call("mcp_math_add", json!({})))
+            .pre_tool_call(
+                &make_tool_call("mcp_math_add", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
 
         // Non-MCP tool "read_file" should be allowed by wildcard
         let res = enforcer
-            .pre_tool_call(&make_tool_call("read_file", json!({})))
+            .pre_tool_call(
+                &make_tool_call("read_file", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
@@ -952,6 +1093,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let mut policies = deny_mcp(&server, None); // "calc/*" deny (level 3)
         policies.extend(allow_mcp(&server, Some(&["add"]))); // "calc/add" allow (level 2)
@@ -959,14 +1102,20 @@ mod tests {
 
         // "add" should be allowed (specific > prefix)
         let res = enforcer
-            .pre_tool_call(&make_tool_call("mcp_calc_add", json!({})))
+            .pre_tool_call(
+                &make_tool_call("mcp_calc_add", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
 
         // "subtract" should be denied (prefix deny applies)
         let res = enforcer
-            .pre_tool_call(&make_tool_call("mcp_calc_subtract", json!({})))
+            .pre_tool_call(
+                &make_tool_call("mcp_calc_subtract", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
@@ -996,6 +1145,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let s2 = McpServerConfig::Stdio {
             name: "math_advanced".to_string(),
@@ -1003,6 +1154,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
 
         let mut policies = deny_mcp(&s2, Some(&["calc"])); // "math_advanced/calc" deny
@@ -1011,14 +1164,20 @@ mod tests {
 
         // "mcp_math_advanced_calc" should be parsed as server="math_advanced", tool="calc"
         let res = enforcer
-            .pre_tool_call(&make_tool_call("mcp_math_advanced_calc", json!({})))
+            .pre_tool_call(
+                &make_tool_call("mcp_math_advanced_calc", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(!res.allow);
 
         // "mcp_math_add" should parse as server="math", tool="add" → allowed by wildcard
         let res = enforcer
-            .pre_tool_call(&make_tool_call("mcp_math_add", json!({})))
+            .pre_tool_call(
+                &make_tool_call("mcp_math_add", json!({})),
+                &crate::context::HookContext::new(),
+            )
             .await
             .unwrap();
         assert!(res.allow);
