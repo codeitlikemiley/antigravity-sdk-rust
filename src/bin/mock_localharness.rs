@@ -189,6 +189,51 @@ async fn handle_ws_connection(
         ws_stream
             .send(WsMessage::Text(step_done.to_string()))
             .await?;
+    } else if prompt.contains("trigger_subagent") {
+        // Upstream's subagent fixture: a main-trajectory step establishes the
+        // main trajectory, a step on a second trajectory carries the subagent's
+        // output, and that trajectory going idle is how the START_SUBAGENT call
+        // completes — there is no tool response for it.
+        let main_step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "delegating",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(main_step.to_string()))
+            .await?;
+
+        let sub_step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "sub_traj",
+                "text": "Here is a poem about nature.",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(sub_step.to_string()))
+            .await?;
+
+        let sub_idle = serde_json::json!({
+            "trajectoryStateUpdate": {
+                "trajectoryId": "sub_traj",
+                "state": "STATE_FULLY_IDLE"
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(sub_idle.to_string()))
+            .await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     } else if prompt.contains("trigger_crash") {
         // Die mid-turn the way a real crash does: something on stderr, then the
         // socket drops with no idle transition. The sleep gives the client's

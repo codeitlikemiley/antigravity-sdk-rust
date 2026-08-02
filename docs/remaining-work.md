@@ -54,9 +54,9 @@ Twelve items, none blocking each other except where noted.
 |---|---|---|---|
 | C2 | A freshly connected connection reports `is_idle == true`. **Blocked on the connect-time race**, not on C3 — the loop restructure removed the first-poll hazard, but a caller polling `receive_steps()` before the reader sees `STATE_RUNNING` still gets an empty stream. Upstream's API is send()-then-receive; ours does not promise that. Tried twice, reverted twice; `NOTE` at both sites | `local.rs`, `wasm.rs` | S |
 | A5 | `Conversation::send` drains the previous turn into history | `conversation.rs`, `connection.rs` | M |
-| hook-dispatch | New target-neutral module for shared hook plumbing | `hook_dispatch.rs` (new) | XS |
-| H1a | Dispatch `pre_turn` from `Connection::send`, with upstream deny semantics | `hook_dispatch.rs`, both transports, `conversation.rs` | S |
-| H12 | Dispatch `post_tool_call` on subagent completion | `local.rs`, `wasm.rs` | S |
+| ~~hook-dispatch~~ | **Done** — `src/hook_dispatch.rs` | `hook_dispatch.rs` (new) | XS |
+| ~~H1a~~ | **Done** — `gate_turn` runs before any state is touched, so a denied turn leaves the connection untouched; a hook that errors denies, matching S2 | `hook_dispatch.rs`, both transports | S |
+| ~~H12~~ | **Done** — a non-main trajectory going idle dispatches `post_tool_call` for `START_SUBAGENT`, carrying the subagent's last model text (or its trajectory id). `examples/subagents.rs` now fires | `local.rs`, `wasm.rs` | S |
 | N3 | Structured per-tool results for harness-executed built-ins | `tool_output.rs` (new), both transports | M |
 
 ---
@@ -164,8 +164,8 @@ That is the milestone worth cutting a release around.
 | # | Batch | Items | Size |
 |---|---|---|---|
 | B1 | Policy ergonomics | S15, N8 | XS |
-| B2 | Hook plumbing module | `hook-dispatch`, H1c, H9 | S |
-| B3 | Turn hooks | H1a (`pre_turn` with deny semantics), H12 | S |
+| B2 | Hook plumbing module — **module + `gate_turn` done**; H1c and H9 remain | `hook-dispatch`, H1c, H9 | S |
+| ~~B3~~ | Turn hooks — **done** | H1a (`pre_turn` with deny semantics), H12 | S |
 | B4 | Conversation drain | A5 + `wait-for-idle` (the latter is a prerequisite, not optional) | M |
 | B5 | Structured tool results | N3 | M |
 | ~~B6~~ | Small correctness — **done** | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |

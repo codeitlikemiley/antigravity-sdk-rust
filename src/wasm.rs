@@ -362,6 +362,12 @@ impl WasmConnectionStrategy {
         let is_idle = Arc::new(AtomicBool::new(false));
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
+        // Last model text seen on each subagent trajectory, so the
+        // `post_tool_call` that fires when the subagent finishes can carry what
+        // it produced (upstream `_subagent_responses`).
+        let subagent_responses: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let conn_subagent_responses = subagent_responses.clone();
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
@@ -417,6 +423,21 @@ impl WasmConnectionStrategy {
                                                 if unset {
                                                     tracing::debug!("main trajectory: {traj_id}");
                                                     let _ = conn_learned_id.set(traj_id.clone());
+                                                }
+                                            }
+
+                                            // A model step on a trajectory that is not the main one
+                                            // came from a subagent. Keep its text: the completion
+                                            // event carries no result of its own (H12).
+                                            {
+                                                let main_id = conn_cascade_id_for_ws.lock().await.clone();
+                                                let is_subagent = !traj_id.is_empty()
+                                                    && main_id.as_ref().is_some_and(|id| *id != traj_id);
+                                                if is_subagent
+                                                    && step_update.source == Some(3)
+                                                    && let Some(text) = step_update.text.clone().filter(|t| !t.is_empty())
+                                                {
+                                                    conn_subagent_responses.lock().await.insert(traj_id.clone(), text);
                                                 }
                                             }
 
@@ -728,6 +749,31 @@ impl WasmConnectionStrategy {
                                             drop(main_id);
 
                                             if !is_main {
+                                                // A subagent finishing is how a START_SUBAGENT call
+                                                // completes — the harness sends no tool response for
+                                                // it. Without this a `post_tool_call` hook saw the
+                                                // pre_tool_call and never a matching completion.
+                                                if tsu.state == Some(2) || tsu.state == Some(3) {
+                                                    let response = conn_subagent_responses
+                                                        .lock()
+                                                        .await
+                                                        .remove(&traj_id)
+                                                        .unwrap_or_else(|| traj_id.clone());
+                                                    if let Some(runner) = hook_runner.as_ref() {
+                                                        let tr = crate::types::ToolResult {
+                                                            name: crate::types::BuiltinTools::StartSubagent
+                                                                .as_str()
+                                                                .to_string(),
+                                                            id: None,
+                                                            result: Some(Value::String(response)),
+                                                            error: None,
+                                                        };
+                                                        let runner = runner.clone();
+                                                        crate::spawn_task(async move {
+                                                            let _ = runner.dispatch_post_tool_call(&tr).await;
+                                                        });
+                                                    }
+                                                }
                                                 continue;
                                             }
 
@@ -1026,6 +1072,7 @@ impl WasmConnectionStrategy {
             main_trajectory_id: conn_cascade_id,
             cancel_requested,
             steps_consumed: Arc::new(AtomicBool::new(false)),
+            subagent_responses,
         })
     }
 }
@@ -1052,6 +1099,9 @@ pub struct WasmConnection {
     cancel_requested: Arc<AtomicBool>,
     /// Whether a `receive_steps()` stream is currently live. See that method.
     steps_consumed: Arc<AtomicBool>,
+    /// Last model text per subagent trajectory; see the capture site in the
+    /// reader loop. Cleared per turn.
+    subagent_responses: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Connection for WasmConnection {
@@ -1125,6 +1175,10 @@ impl Connection for WasmConnection {
     }
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
+        // Before any state is touched: a denied turn must leave the connection
+        // exactly as it was, not half-reset with a cleared trajectory.
+        crate::hook_dispatch::gate_turn(self.hook_runner.as_ref()).await?;
+
         self.is_idle.store(false, Ordering::SeqCst);
         // A halt applies to the turn it interrupted. Leaving the flag set would
         // make the *next* turn report itself cancelled the moment it went idle.
@@ -1135,6 +1189,11 @@ impl Connection for WasmConnection {
             // reset_for_turn(), event_processor.py:379-386).
             let mut main_id = self.main_trajectory_id.lock().await;
             *main_id = None;
+        }
+        {
+            // Last turn's subagent text must not be attributed to this turn's
+            // subagents (upstream clears the same map in send()).
+            self.subagent_responses.lock().await.clear();
         }
         {
             let mut guard = self.step_rx.lock().await;

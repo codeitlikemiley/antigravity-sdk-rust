@@ -411,3 +411,67 @@ async fn test_harness_crash_surfaces_stderr_tail() {
         "the crash was reported without the harness's own diagnostics; saw: {joined}"
     );
 }
+
+/// A subagent finishing is how a `START_SUBAGENT` call completes — the harness
+/// sends no tool response for it. Before H12 a `post_tool_call` hook saw the
+/// `pre_tool_call` and never a matching completion, so
+/// `examples/subagents.rs`'s "Subagent Finished" branch never fired.
+#[tokio::test]
+async fn test_post_tool_call_fires_on_subagent_completion() {
+    use antigravity_sdk_rust::hooks::Hook;
+    use antigravity_sdk_rust::types::ToolResult;
+    use futures_util::StreamExt;
+    use std::sync::{Arc, Mutex};
+
+    struct CaptureHook(Arc<Mutex<Vec<ToolResult>>>);
+
+    impl Hook for CaptureHook {
+        async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
+            self.0.lock().expect("lock").push(result.clone());
+            Ok(())
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    config.policies = Some(vec![policy::allow_all()]);
+    config.conversation_id = Some("test-conv-subagent-0123456789abc".to_string());
+    config.hooks = vec![Arc::new(CaptureHook(captured.clone()))];
+
+    let agent = Agent::new(config).start().await.expect("start");
+    let conversation = agent.conversation();
+    conversation.send("trigger_subagent").await.expect("send");
+
+    let mut stream = conversation.receive_steps();
+    while stream.next().await.is_some() {}
+
+    // The dispatch is spawned, so give it a moment to land rather than racing it.
+    for _ in 0..50 {
+        if !captured.lock().expect("lock").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let results = captured.lock().expect("lock").clone();
+    let subagent = results
+        .iter()
+        .find(|r| r.name == "START_SUBAGENT")
+        .expect("no post_tool_call for the finished subagent");
+    assert_eq!(
+        subagent.result,
+        Some(serde_json::json!("Here is a poem about nature.")),
+        "the completion should carry what the subagent produced"
+    );
+
+    agent.stop().await.expect("stop");
+}

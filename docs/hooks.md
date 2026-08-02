@@ -616,3 +616,17 @@ policy store, or whose predicate panicked, must not fall open.
 This is a behaviour change: a hook that used to error and let tools through now
 blocks them. If a hook has a failure mode you want to tolerate, handle it inside
 the hook and return `allow: true` explicitly.
+
+## `post_tool_call` and subagents
+
+A `START_SUBAGENT` call completes when the subagent's trajectory goes idle —
+the harness sends no tool response for it. `post_tool_call` fires at that point
+with `name = "START_SUBAGENT"` and `result` set to the subagent's last model
+text, falling back to its trajectory id when it produced none.
+
+## `pre_turn` can refuse a turn
+
+Returning `allow: false` from `pre_turn` stops the prompt from being sent at
+all: `send()` returns the hook's message as an error rather than starting a
+turn that produces nothing. As with `pre_tool_call`, a hook that *errors*
+refuses the turn too.

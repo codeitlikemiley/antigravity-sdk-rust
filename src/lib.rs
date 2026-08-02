@@ -65,6 +65,7 @@ pub mod context;
 pub mod conversation;
 pub mod error;
 pub mod harness_config;
+pub mod hook_dispatch;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
