@@ -8,6 +8,9 @@
 /// never sends one, so this bounds that case rather than failing it.
 const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 
+/// How long `disconnect()` waits for the harness to acknowledge session end.
+const SESSION_END_TIMEOUT_SECONDS: u64 = 10;
+
 /// How long to wait for the harness to exit after stdin closes, before
 /// escalating. Upstream uses the same three minutes (`local_connection.py:53`).
 const PROCESS_WAIT_TIMEOUT_SECONDS: u64 = 3 * 60;
@@ -86,6 +89,10 @@ pub struct LocalConnection {
     steps_consumed: Arc<AtomicBool>,
     /// Mirrors `is_idle` for [`Connection::wait_for_idle`].
     idle_tx: tokio::sync::watch::Sender<bool>,
+    /// Set when the harness answers `session_end_request`.
+    session_end_tx: tokio::sync::watch::Sender<bool>,
+    /// Set once the websocket reader has seen the socket close.
+    socket_closed: Arc<AtomicBool>,
     /// Last model text per subagent trajectory; see the capture site in the
     /// reader loop. Cleared per turn.
     subagent_responses: Arc<Mutex<HashMap<String, String>>>,
@@ -355,6 +362,31 @@ impl Connection for LocalConnection {
             && let Err(e) = runner.dispatch_session_end().await
         {
             tracing::error!("on_session_end hook failed: {e:?}");
+        }
+
+        // Tell the harness the session is over and wait for it to say it has
+        // flushed. Upstream sends this before closing stdin; skipping it meant
+        // shutdown raced the harness's own trajectory write (B7).
+        // Nothing to wait for once the socket is gone — a crashed harness will
+        // never answer, and blocking on it would add the full timeout to every
+        // teardown after a crash.
+        if !self.socket_closed.load(Ordering::SeqCst) {
+            let input_event = InputEvent {
+                event: Some(
+                    crate::proto::localharness::input_event::Event::SessionEndRequest(true),
+                ),
+            };
+            if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                let _ = self.ws_tx.send(raw_json);
+                let mut rx = self.session_end_tx.subscribe();
+                // Bounded: a harness that never answers must not hold shutdown
+                // open, and closing stdin below stops it regardless.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(SESSION_END_TIMEOUT_SECONDS),
+                    rx.wait_for(|acked| *acked),
+                )
+                .await;
+            }
         }
 
         // Ordered shutdown, mirroring upstream local_connection.py:407-455.
@@ -923,6 +955,10 @@ impl LocalConnectionStrategy {
         // upstream has (C2).
         let is_idle = Arc::new(AtomicBool::new(true));
         let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
+        let (session_end_tx, _session_end_rx) = tokio::sync::watch::channel(false);
+        let conn_session_end = session_end_tx.clone();
+        let socket_closed = Arc::new(AtomicBool::new(false));
+        let conn_socket_closed = socket_closed.clone();
         let conn_idle_tx = idle_tx.clone();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
@@ -1480,8 +1516,11 @@ impl LocalConnectionStrategy {
                                             });
                                         }
                                         crate::proto::localharness::output_event::Event::SessionEndResponse(_) => {
-                                            // Answer to a session_end_request we do not send yet (WP-6).
+                                            // The harness has flushed the trajectory. Release
+                                            // `disconnect()`, which waits for this before tearing
+                                            // the process down (B7).
                                             tracing::debug!("session_end_response");
+                                            let _ = conn_session_end.send(true);
                                         }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
@@ -1656,6 +1695,7 @@ impl LocalConnectionStrategy {
             // died mid-turn: say so, and quote what it printed on its way out.
             // Without this the step stream just ends and the caller sees a turn
             // that produced nothing, with no indication anything went wrong.
+            conn_socket_closed.store(true, Ordering::SeqCst);
             if !conn_is_idle_for_close.load(Ordering::SeqCst) {
                 let tail = {
                     let tail = stderr_tail.lock().await;
@@ -1695,6 +1735,8 @@ impl LocalConnectionStrategy {
             cancel_requested,
             steps_consumed: Arc::new(AtomicBool::new(false)),
             idle_tx,
+            session_end_tx,
+            socket_closed,
             subagent_responses,
             initial_history,
         })

@@ -33,7 +33,7 @@ sanitization; 127.0.0.1 connect fallback.
 | ID | What | Size | Blocked by |
 |---|---|---|---|
 | ~~WP-6~~ | **Done** on both transports; `DebugConfig` is not in the 0.1.9 proto and is out of scope | S | — |
-| WP-2 tail | `session_end` reply; a `callHookRequest` branch so WP-8 is exercisable; assert `clientInfo.os`/`env` on the handshake; replace the wasm in-file mock's closed Rust→Rust loop with real fixtures | S | — |
+| ~~WP-2 tail~~ | **Done** — `session_end` handshake, `callHookRequest` exercised end to end, wasm mock uses real frames | S | — |
 | **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
 | WP-4 | Model configuration public API — `ModelTarget` / `ModelEndpoint` replacing `GeminiConfig`; the wire shape is already correct, this is the type graph and the env-var routing | L | WP-1 |
 | WP-7 | Tool runner correctness: `error_message` on the wire, argument coercion, `ToolContext` wiring, media extraction | M | WP-1 |
@@ -169,7 +169,7 @@ That is the milestone worth cutting a release around.
 | ~~B4~~ | Conversation drain — **done** | A5 + `wait-for-idle` | M |
 | B5 | Structured tool results | N3 | M |
 | ~~B6~~ | Small correctness — **done** | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
-| B7 | WP-2 tail (**CI subset done**; `session_end` reply + `callHookRequest` branch remain) | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
+| ~~B7~~ | WP-2 tail — **done**. `session_end` request and its acknowledgement, the `callHookRequest` branch (E4), and the CI subset | M |
 
 **The CI half of B7 landed early**, after A1 shipped to `src/local.rs` only and
 nothing caught the missing `src/wasm.rs` half. CI now compiles the wasm target,

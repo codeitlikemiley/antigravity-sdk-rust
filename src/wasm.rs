@@ -9,6 +9,9 @@
 /// starts with no replayed history, which is correct for one.
 const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 
+/// How long `disconnect()` waits for the harness to acknowledge session end.
+const SESSION_END_TIMEOUT_SECONDS: u64 = 10;
+
 use anyhow::{Result, anyhow};
 use futures_util::stream::{self, BoxStream, StreamExt};
 use serde_json::Value;
@@ -399,6 +402,10 @@ impl WasmConnectionStrategy {
         // upstream has (C2).
         let is_idle = Arc::new(AtomicBool::new(true));
         let (idle_tx, _idle_rx) = tokio::sync::watch::channel(true);
+        let (session_end_tx, _session_end_rx) = tokio::sync::watch::channel(false);
+        let conn_session_end = session_end_tx.clone();
+        let socket_closed = Arc::new(AtomicBool::new(false));
+        let conn_socket_closed = socket_closed.clone();
         let (initial_history_tx, _initial_history_rx) =
             tokio::sync::watch::channel::<Option<Vec<Step>>>(None);
         let conn_initial_history = initial_history_tx.clone();
@@ -939,8 +946,11 @@ impl WasmConnectionStrategy {
                                             });
                                         }
                                         crate::proto::localharness::output_event::Event::SessionEndResponse(_) => {
-                                            // Answer to a session_end_request we do not send yet (WP-6).
+                                            // The harness has flushed the trajectory. Release
+                                            // `disconnect()`, which waits for this before tearing
+                                            // the process down (B7).
                                             tracing::debug!("session_end_response");
+                                            let _ = conn_session_end.send(true);
                                         }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
@@ -1119,6 +1129,7 @@ impl WasmConnectionStrategy {
             // mid-turn: say so rather than ending the stream as though the turn
             // had completed. There is no stderr to quote on this transport —
             // the local one appends the harness's own last words here.
+            conn_socket_closed.store(true, Ordering::SeqCst);
             if !conn_is_idle_for_close.load(Ordering::SeqCst) {
                 let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
                     "harness connection closed before the turn finished"
@@ -1148,6 +1159,8 @@ impl WasmConnectionStrategy {
             steps_consumed: Arc::new(AtomicBool::new(false)),
             idle_tx,
             initial_history_tx,
+            session_end_tx,
+            socket_closed,
             subagent_responses,
         })
     }
@@ -1179,6 +1192,10 @@ pub struct WasmConnection {
     idle_tx: tokio::sync::watch::Sender<bool>,
     /// The handshake reply's replayed history, published by the reader.
     initial_history_tx: tokio::sync::watch::Sender<Option<Vec<Step>>>,
+    /// Set when the harness answers `session_end_request`.
+    session_end_tx: tokio::sync::watch::Sender<bool>,
+    /// Set once the websocket reader has seen the socket close.
+    socket_closed: Arc<AtomicBool>,
     /// Last model text per subagent trajectory; see the capture site in the
     /// reader loop. Cleared per turn.
     subagent_responses: Arc<Mutex<HashMap<String, String>>>,
@@ -1463,6 +1480,32 @@ impl Connection for WasmConnection {
         {
             tracing::error!("on_session_end hook failed: {e:?}");
         }
+
+        // Tell the harness the session is over and wait for it to say it has
+        // flushed. Upstream sends this before closing stdin; skipping it meant
+        // shutdown raced the harness's own trajectory write (B7).
+        // Nothing to wait for once the socket is gone — a crashed harness will
+        // never answer, and blocking on it would add the full timeout to every
+        // teardown after a crash.
+        if !self.socket_closed.load(Ordering::SeqCst) {
+            let input_event = InputEvent {
+                event: Some(
+                    crate::proto::localharness::input_event::Event::SessionEndRequest(true),
+                ),
+            };
+            if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                let _ = self.ws_tx.send(raw_json);
+                let mut rx = self.session_end_tx.subscribe();
+                // Bounded: a harness that never answers must not hold shutdown
+                // open, and closing stdin below stops it regardless.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(SESSION_END_TIMEOUT_SECONDS),
+                    rx.wait_for(|acked| *acked),
+                )
+                .await;
+            }
+        }
+
         Ok(())
     }
 }

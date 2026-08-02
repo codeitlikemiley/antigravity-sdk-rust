@@ -386,8 +386,17 @@ async fn handle_ws_connection(
         .send(WsMessage::Text(traj_idle.to_string()))
         .await?;
 
-    // Keep reading until client disconnects or we get terminated
+    // Keep reading until client disconnects or we get terminated. A
+    // sessionEndRequest must be answered: the client waits for the acknowledgement
+    // before tearing the process down, exactly as it does against a real harness.
     while let Some(msg_res) = ws_stream.next().await {
+        if let Ok(WsMessage::Text(ref text)) = msg_res
+            && text.contains("sessionEndRequest")
+        {
+            let ack = serde_json::json!({ "sessionEndResponse": true });
+            let _ = ws_stream.send(WsMessage::Text(ack.to_string())).await;
+            continue;
+        }
         if msg_res.is_err() {
             break;
         }
