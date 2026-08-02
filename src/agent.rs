@@ -253,6 +253,24 @@ impl Agent<Unstarted> {
             // strategy) all read the one field.
             let workspaces = crate::workspace::resolve(self.config.workspaces.as_ref());
 
+            // Upstream constrains the id (connection.py:100-107): the harness
+            // requires at least 32 characters and rejects anything outside
+            // [a-zA-Z0-9-], which otherwise surfaces as an opaque failure at
+            // connect time.
+            if let Some(ref id) = self.config.conversation_id {
+                if id.len() < 32 {
+                    return Err(anyhow!(
+                        "conversation_id must be at least 32 characters, got {}",
+                        id.len()
+                    ));
+                }
+                if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    return Err(anyhow!(
+                        "conversation_id must contain only [a-zA-Z0-9-], got '{id}'"
+                    ));
+                }
+            }
+
             // Upstream rejects RESUME without an id at config time
             // (connection.py:109-117); this crate has no config-validation hook,
             // so it is checked here.
@@ -401,6 +419,12 @@ impl Agent<Started> {
     ///
     /// Returns an error if the execution stream encounters a failure.
     pub async fn chat(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
+        // Upstream rejects an empty prompt rather than sending it (agent.py).
+        // An empty UserInput reaches the harness as a turn with no content, so
+        // the model is asked to respond to nothing and the turn is wasted.
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("prompt must not be empty"));
+        }
         self.state.conversation.chat_to_completion(prompt).await
     }
 

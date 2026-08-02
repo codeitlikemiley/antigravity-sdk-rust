@@ -47,7 +47,7 @@ async fn test_agent_chat_integration() {
     };
 
     config.policies = Some(vec![policy::allow_all()]);
-    config.conversation_id = Some("test_conv_123".to_string());
+    config.conversation_id = Some("test-conv-0123456789abcdef0123456789".to_string());
     config.workspaces = Some(vec![
         std::env::current_dir()
             .unwrap()
@@ -77,7 +77,10 @@ async fn test_agent_chat_integration() {
 
     // 4. Verify conversation metadata
     let conversation = agent.conversation();
-    assert_eq!(conversation.conversation_id(), "test_conv_123");
+    assert_eq!(
+        conversation.conversation_id(),
+        "test-conv-0123456789abcdef0123456789"
+    );
 
     // 5. Stop agent
     agent.stop().await.expect("Failed to stop agent");
@@ -218,7 +221,7 @@ async fn test_agent_terminal_error_propagation() {
     };
 
     config.policies = Some(vec![policy::allow_all()]);
-    config.conversation_id = Some("test_conv_err".to_string());
+    config.conversation_id = Some("test-conv-err-0123456789abcdef0123".to_string());
 
     let agent = Agent::new(config);
     let agent = agent.start().await.expect("Failed to start agent");
