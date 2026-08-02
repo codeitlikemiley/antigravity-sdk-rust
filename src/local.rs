@@ -172,7 +172,7 @@ impl Connection for LocalConnection {
 
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::UserInput(
-                content.to_string(),
+                crate::harness_config::sanitize_prompt(content),
             )),
         };
         let raw_json = serde_json::to_string(&input_event)?;
@@ -946,7 +946,19 @@ impl LocalConnectionStrategy {
                                                 f.output_string.as_ref().and_then(|s| serde_json::from_str(s).ok())
                                             });
 
-                                            let error_msg = step_update.error_message.clone().unwrap_or_default();
+                                            // A step can carry ActionError{error_message,
+                                            // http_code} with an empty top-level message, which
+                                            // reported the failure as blank (audit C14).
+                                            let error_msg = step_update
+                                                .error_message
+                                                .clone()
+                                                .or_else(|| {
+                                                    step_update
+                                                        .error
+                                                        .as_ref()
+                                                        .and_then(|e| e.error_message.clone())
+                                                })
+                                                .unwrap_or_default();
                                             let http_code = step_update.error.as_ref().and_then(|e| e.http_code).unwrap_or(0);
 
                                             let step = Step {

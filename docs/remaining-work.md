@@ -163,8 +163,8 @@ plans.
 | ~~A1~~ | ~~Main-trajectory tracking~~ — **done** | Replace `parent_idle` + `active_subagent_ids` with `main_trajectory_id` set from the first non-empty `trajectory_id`; return early for non-main trajectories; clear it in `send()` | S | A subagent going idle no longer ends the caller's turn; the `OnceLock` learning heuristic is gone |
 | A2 | Sentinel restructure — **loop half done**; the `StepEvent` enum and C2 remain | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
 | A3 | Cancellation — **harness half done** (`STATE_CANCELLED` arm + `AntigravityError::Cancelled`). Remaining: a client-side `cancel()` that sets a flag so a caller-initiated halt also surfaces as Cancelled rather than a normal end | S | A cancelled turn is distinguishable from a completed one |
-| A4 | Turn-level errors — **`TrajectoryStateUpdate.error` done**. Remaining: `ActionError.error_message` fallback and the harness-crash stderr tail | S | A turn that fails server-side surfaces an error instead of ending silently |
-| A5 | WP-6 remainder | Seed `Conversation` from `initial_history`; `env` passthrough; prompt sanitization; `save_dir` temp default; 127.0.0.1 fallback; `DebugConfig` | M | A resumed conversation starts with its history |
+| A4 | Turn-level errors — **done** except the harness-crash stderr tail | S | A turn that fails server-side surfaces an error instead of ending silently |
+| A5 | WP-6 remainder — **prompt sanitization done**. Remaining: seed `Conversation` from `initial_history`; `env` passthrough; `save_dir` temp default; 127.0.0.1 fallback; `DebugConfig` | M | A resumed conversation starts with its history |
 
 **After Phase A the SDK should complete a real turn against a 0.1.9 harness.**
 That is the milestone worth cutting a release around.

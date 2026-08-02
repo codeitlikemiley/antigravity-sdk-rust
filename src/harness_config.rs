@@ -107,3 +107,40 @@ pub fn os_version() -> String {
         String::new()
     }
 }
+
+/// Strips control characters a harness will reject from a user prompt.
+///
+/// Mirrors upstream `_sanitize_prompt` (`local_connection.py:219-229`, added
+/// 0.1.8). Tab, newline and carriage return are kept — they are meaningful in a
+/// prompt; the rest of C0, DEL and the C1 range are not.
+#[must_use]
+pub fn sanitize_prompt(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(*c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_prompt_keeps_meaningful_whitespace() {
+        assert_eq!(sanitize_prompt("a\tb\nc\r\nd"), "a\tb\nc\r\nd");
+    }
+
+    #[test]
+    fn sanitize_prompt_strips_control_characters() {
+        assert_eq!(sanitize_prompt("a\u{0}b\u{7}c\u{1f}d\u{7f}e"), "abcde");
+        // C1 range, which arrives from mis-decoded input rather than a user.
+        assert_eq!(sanitize_prompt("x\u{85}y\u{9f}z"), "xyz");
+    }
+
+    #[test]
+    fn sanitize_prompt_leaves_ordinary_text_alone() {
+        let text = "Hello — こんにちは 🌍";
+        assert_eq!(sanitize_prompt(text), text);
+    }
+}
