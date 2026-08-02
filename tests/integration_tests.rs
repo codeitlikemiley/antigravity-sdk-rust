@@ -316,3 +316,98 @@ async fn test_workspace_policy_denies_parent_traversal() {
         "a `..` escape must be denied, got: {decision}"
     );
 }
+
+/// A caller-initiated halt must be distinguishable from a turn that simply
+/// finished (A3). The harness answers a halt with a plain `STATE_FULLY_IDLE`,
+/// so without the client-side flag the stream would just end normally.
+#[tokio::test]
+async fn test_cancel_surfaces_cancelled_error() {
+    use futures_util::StreamExt;
+
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    config.policies = Some(vec![policy::allow_all()]);
+    config.conversation_id = Some("test-conv-cancel-0123456789abcdef".to_string());
+
+    let agent = Agent::new(config).start().await.expect("start");
+    let conversation = agent.conversation();
+
+    conversation.send("trigger_cancel").await.expect("send");
+
+    let mut stream = conversation.receive_steps();
+    // The mock emits one step before stalling; draining it proves the turn is
+    // under way, so the halt below lands mid-turn rather than before it starts.
+    let first = stream.next().await.expect("a step").expect("not an error");
+    assert_eq!(first.content, "Working...");
+
+    conversation.cancel().await.expect("cancel");
+
+    let mut saw_cancelled = false;
+    while let Some(item) = stream.next().await {
+        if let Err(e) = item {
+            saw_cancelled = e
+                .downcast_ref::<antigravity_sdk_rust::error::AntigravityError>()
+                .is_some_and(|e| {
+                    matches!(
+                        e,
+                        antigravity_sdk_rust::error::AntigravityError::Cancelled(_)
+                    )
+                });
+            if saw_cancelled {
+                break;
+            }
+        }
+    }
+    assert!(saw_cancelled, "cancelled turn ended as if it had completed");
+
+    agent.stop().await.expect("stop");
+}
+
+/// A harness that dies mid-turn must surface an error carrying what it printed
+/// on the way out, not end the step stream as though the turn had completed
+/// (`harness-crash-diagnostics`).
+#[tokio::test]
+async fn test_harness_crash_surfaces_stderr_tail() {
+    use futures_util::StreamExt;
+
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    config.policies = Some(vec![policy::allow_all()]);
+    config.conversation_id = Some("test-conv-crash-0123456789abcdef0".to_string());
+
+    let agent = Agent::new(config).start().await.expect("start");
+    let conversation = agent.conversation();
+    conversation.send("trigger_crash").await.expect("send");
+
+    let mut stream = conversation.receive_steps();
+    let mut errors = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let Err(e) = item {
+            errors.push(e.to_string());
+        }
+    }
+
+    let joined = errors.join("\n");
+    assert!(
+        joined.contains("closed before the turn finished"),
+        "a crash ended the stream silently; saw: {joined}"
+    );
+    assert!(
+        joined.contains("mock harness exploded"),
+        "the crash was reported without the harness's own diagnostics; saw: {joined}"
+    );
+}

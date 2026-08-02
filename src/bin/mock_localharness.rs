@@ -55,6 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout.write_all(&output_buf).await?;
     stdout.flush().await?;
 
+    // Exit on stdin EOF, which is how `disconnect()` asks the harness to shut
+    // down (the real one monitors stdin for the same reason). Without this the
+    // mock outlived every test by the client's full 3-minute process-wait
+    // timeout — the integration suite took six minutes, almost all of it spent
+    // waiting for a process that was never going to exit on its own.
+    tokio::spawn(async move {
+        let mut sink = Vec::new();
+        let _ = stdin.read_to_end(&mut sink).await;
+        std::process::exit(0);
+    });
+
     // 4. Accept a TCP connection and upgrade to WebSocket
     let (stream, _) = listener.accept().await?;
     let ws_stream = accept_async(stream).await?;
@@ -178,6 +189,40 @@ async fn handle_ws_connection(
         ws_stream
             .send(WsMessage::Text(step_done.to_string()))
             .await?;
+    } else if prompt.contains("trigger_crash") {
+        // Die mid-turn the way a real crash does: something on stderr, then the
+        // socket drops with no idle transition. The sleep gives the client's
+        // stderr reader time to see the line before the socket closes; the two
+        // arrive on different channels and are not ordered against each other.
+        eprintln!("panic: mock harness exploded");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::process::exit(101);
+    } else if prompt.contains("trigger_cancel") {
+        // Emit one step, then stall until the client halts. The real harness
+        // answers a halt with an ordinary STATE_FULLY_IDLE — it does *not* send
+        // STATE_CANCELLED — which is exactly the case the client-side flag
+        // exists to disambiguate. Waiting for the frame rather than sleeping
+        // keeps the test deterministic.
+        let step1 = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "Working...",
+                "state": "STATE_ACTIVE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER"
+            }
+        });
+        ws_stream.send(WsMessage::Text(step1.to_string())).await?;
+
+        while let Some(msg_res) = ws_stream.next().await {
+            match msg_res? {
+                WsMessage::Text(text) if text.contains("haltRequest") => break,
+                WsMessage::Close(_) => break,
+                _ => {}
+            }
+        }
     } else if prompt.contains("trigger_terminal_error") {
         let step_terminal = serde_json::json!({
             "stepUpdate": {

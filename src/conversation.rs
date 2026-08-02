@@ -325,6 +325,25 @@ impl Conversation {
         })
     }
 
+    /// Halts the turn in flight.
+    ///
+    /// The harness stops the trajectory and reports ordinary idle, so the
+    /// connection marks the turn as caller-cancelled: the in-flight
+    /// `receive_steps()` stream yields
+    /// [`AntigravityError::Cancelled`](crate::error::AntigravityError::Cancelled)
+    /// before it ends, which is what distinguishes a halted turn from one that
+    /// simply finished.
+    ///
+    /// Cancelling when no turn is running is harmless — the flag is cleared by
+    /// the next [`send`](Self::send).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the halt request cannot be transmitted.
+    pub async fn cancel(&self) -> Result<(), anyhow::Error> {
+        self.conn.send_halt_request().await
+    }
+
     /// Gracefully closes the underlying connection.
     ///
     /// # Errors

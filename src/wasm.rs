@@ -357,10 +357,13 @@ impl WasmConnectionStrategy {
         // hides this; ours does not promise that yet. Flipping it needs the
         // connect-time race closed first (see C2 in docs/remaining-work.md).
         let is_idle = Arc::new(AtomicBool::new(false));
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
+        let conn_is_idle_for_close = is_idle.clone();
+        let conn_cancel_requested = cancel_requested.clone();
         let conn_step_trackers = step_trackers.clone();
 
         let tool_runner = self.tool_runner.clone();
@@ -394,17 +397,23 @@ impl WasmConnectionStrategy {
                                             let step_idx = step_update.step_index.unwrap_or(0);
                                             let key = (traj_id.clone(), step_idx);
 
-                                            // Learn the cascade_id from the first StepUpdate
-                                            // where cascade_id == trajectory_id (Python parity)
-                                            {
-                                                let cascade_id_val = step_update.cascade_id.clone().unwrap_or_default();
-                                                if !cascade_id_val.is_empty() && cascade_id_val == traj_id {
-                                                    let _ = conn_learned_id.set(cascade_id_val.clone());
-                                                    let mut cid = conn_cascade_id_for_ws.lock().await;
-                                                    if cid.is_none() {
-                                                        tracing::debug!("Learned cascade_id from StepUpdate: {}", cascade_id_val);
-                                                        *cid = Some(cascade_id_val);
-                                                    }
+                                            // The main trajectory is whichever one reports first,
+                                            // unconditionally — upstream event_processor.py:478-480.
+                                            // The previous rule also required cascade_id ==
+                                            // trajectory_id, so on a resumed session, or when a
+                                            // subagent reported first, nothing was ever learned and
+                                            // every trajectory then counted as the main one.
+                                            // (A1; the local transport got this fix first.)
+                                            if !traj_id.is_empty() {
+                                                let mut main_id = conn_cascade_id_for_ws.lock().await;
+                                                let unset = main_id.is_none();
+                                                if unset {
+                                                    *main_id = Some(traj_id.clone());
+                                                }
+                                                drop(main_id);
+                                                if unset {
+                                                    tracing::debug!("main trajectory: {traj_id}");
+                                                    let _ = conn_learned_id.set(traj_id.clone());
                                                 }
                                             }
 
@@ -737,6 +746,7 @@ impl WasmConnectionStrategy {
                                             }
 
                                             if tsu.state == Some(3) { // STATE_CANCELLED
+                                                conn_cancel_requested.store(false, Ordering::SeqCst);
                                                 let reason = tsu
                                                     .error
                                                     .clone()
@@ -745,6 +755,20 @@ impl WasmConnectionStrategy {
                                                 let _ = step_tx.send(
                                                     crate::step_extract::StepEvent::Error(
                                                         anyhow!(crate::error::AntigravityError::Cancelled(reason)),
+                                                    ),
+                                                );
+                                            } else if tsu.state == Some(2) // STATE_FULLY_IDLE
+                                                && conn_cancel_requested.swap(false, Ordering::SeqCst)
+                                            {
+                                                // A halt the caller asked for. The harness stops
+                                                // the turn and reports ordinary idle, so this is
+                                                // the only point at which the two can be told
+                                                // apart (A3, docs/remaining-work.md).
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(
+                                                        anyhow!(crate::error::AntigravityError::Cancelled(
+                                                            "Cancelled by caller".to_string()
+                                                        )),
                                                     ),
                                                 );
                                             }
@@ -967,6 +991,18 @@ impl WasmConnectionStrategy {
                     }
                 }
             }
+
+            // The socket is gone. If the turn had not reached idle, it died
+            // mid-turn: say so rather than ending the stream as though the turn
+            // had completed. There is no stderr to quote on this transport —
+            // the local one appends the harness's own last words here.
+            if !conn_is_idle_for_close.load(Ordering::SeqCst) {
+                let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
+                    "harness connection closed before the turn finished"
+                )));
+                conn_is_idle_for_close.store(true, Ordering::SeqCst);
+                let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
+            }
         });
 
         // Hook runners dispatch session start
@@ -983,6 +1019,8 @@ impl WasmConnectionStrategy {
             tool_runner: self.tool_runner.clone(),
             hook_runner: self.hook_runner.clone(),
             step_trackers,
+            main_trajectory_id: conn_cascade_id,
+            cancel_requested,
         })
     }
 }
@@ -999,6 +1037,14 @@ pub struct WasmConnection {
     tool_runner: Option<ToolRunner>,
     hook_runner: Option<HookRunner>,
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
+    /// The trajectory whose idle transitions end a turn. Learned from the first
+    /// `StepUpdate` of each turn and cleared by `send()`, mirroring upstream's
+    /// `reset_for_turn()` (`event_processor.py:379-386`).
+    main_trajectory_id: Arc<Mutex<Option<String>>>,
+    /// Set by [`Connection::send_halt_request`], cleared by the next `send()`
+    /// or by the idle transition that consumes it. See the field of the same
+    /// name on `LocalConnection` for why it is needed.
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl Connection for WasmConnection {
@@ -1059,6 +1105,16 @@ impl Connection for WasmConnection {
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
         self.is_idle.store(false, Ordering::SeqCst);
+        // A halt applies to the turn it interrupted. Leaving the flag set would
+        // make the *next* turn report itself cancelled the moment it went idle.
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        {
+            // A new turn may run on a new trajectory; relearn it rather than
+            // judging this turn against the last one's (upstream
+            // reset_for_turn(), event_processor.py:379-386).
+            let mut main_id = self.main_trajectory_id.lock().await;
+            *main_id = None;
+        }
         {
             let mut guard = self.step_rx.lock().await;
             if let Some(rx) = &mut *guard {
@@ -1090,6 +1146,7 @@ impl Connection for WasmConnection {
     }
 
     async fn send_halt_request(&self) -> Result<(), anyhow::Error> {
+        self.cancel_requested.store(true, Ordering::SeqCst);
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::HaltRequest(
                 true,

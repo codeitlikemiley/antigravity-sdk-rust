@@ -12,6 +12,9 @@ const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 /// escalating. Upstream uses the same three minutes (`local_connection.py:53`).
 const PROCESS_WAIT_TIMEOUT_SECONDS: u64 = 3 * 60;
 
+/// How many trailing harness stderr lines to retain for crash diagnostics.
+const STDERR_TAIL_LINES: usize = 20;
+
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
@@ -37,7 +40,7 @@ use futures_util::stream::{self, BoxStream};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -71,6 +74,14 @@ pub struct LocalConnection {
     /// `StepUpdate` of each turn and cleared by `send()`, mirroring upstream's
     /// `reset_for_turn()` (`event_processor.py:379-386`).
     main_trajectory_id: Arc<Mutex<Option<String>>>,
+    /// Set by [`Connection::send_halt_request`], cleared by the next `send()`
+    /// or by the idle transition that consumes it.
+    ///
+    /// The harness answers a caller-initiated halt with a plain
+    /// `STATE_FULLY_IDLE`, not `STATE_CANCELLED` — so without this flag a
+    /// cancelled turn is indistinguishable from a completed one, and a caller
+    /// that halts mid-turn sees the stream end as if the model had finished.
+    cancel_requested: Arc<AtomicBool>,
     /// Steps the harness replayed in its handshake reply, for a resumed
     /// conversation. Seeding `Conversation` with these is the remaining
     /// half of WP-6.
@@ -157,6 +168,9 @@ impl Connection for LocalConnection {
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
         self.is_idle.store(false, Ordering::SeqCst);
+        // A halt applies to the turn it interrupted. Leaving the flag set would
+        // make the *next* turn report itself cancelled the moment it went idle.
+        self.cancel_requested.store(false, Ordering::SeqCst);
         {
             // A new turn may run on a new trajectory; relearn it rather than
             // judging this turn against the last one's (upstream
@@ -195,6 +209,7 @@ impl Connection for LocalConnection {
     }
 
     async fn send_halt_request(&self) -> Result<(), anyhow::Error> {
+        self.cancel_requested.store(true, Ordering::SeqCst);
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::HaltRequest(
                 true,
@@ -810,10 +825,13 @@ impl LocalConnectionStrategy {
         // hides this; ours does not promise that yet. Flipping it needs the
         // connect-time race closed first (see C2 in docs/remaining-work.md).
         let is_idle = Arc::new(AtomicBool::new(false));
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
+        let conn_is_idle_for_close = is_idle.clone();
+        let conn_cancel_requested = cancel_requested.clone();
         let conn_step_trackers = step_trackers.clone();
 
         let tool_runner = self.tool_runner.clone();
@@ -825,6 +843,14 @@ impl LocalConnectionStrategy {
         let conn_cascade_id_for_ws = conn_cascade_id.clone();
 
         // 8. Spawn Stderr Reader
+        //
+        // The tail is retained rather than only logged: when the harness dies
+        // the websocket simply closes, and the reason it died is in these lines.
+        // Discarding them left a crash indistinguishable from a clean end of
+        // stream (`harness-crash-diagnostics`).
+        let stderr_tail: Arc<Mutex<VecDeque<String>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        let reader_stderr_tail = stderr_tail.clone();
         let mut reader = tokio::io::BufReader::new(child_stderr);
         tokio::spawn(async move {
             let mut line = String::new();
@@ -832,7 +858,15 @@ impl LocalConnectionStrategy {
                 if n == 0 {
                     break;
                 }
-                tracing::info!("Harness stderr: {}", line.trim_end());
+                let trimmed = line.trim_end().to_string();
+                tracing::info!("Harness stderr: {trimmed}");
+                {
+                    let mut tail = reader_stderr_tail.lock().await;
+                    if tail.len() == STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(trimmed);
+                }
                 line.clear();
             }
         });
@@ -1211,6 +1245,7 @@ impl LocalConnectionStrategy {
                                             }
 
                                             if tsu.state == Some(3) { // STATE_CANCELLED
+                                                conn_cancel_requested.store(false, Ordering::SeqCst);
                                                 let reason = tsu
                                                     .error
                                                     .clone()
@@ -1219,6 +1254,20 @@ impl LocalConnectionStrategy {
                                                 let _ = step_tx.send(
                                                     crate::step_extract::StepEvent::Error(
                                                         anyhow!(crate::error::AntigravityError::Cancelled(reason)),
+                                                    ),
+                                                );
+                                            } else if tsu.state == Some(2) // STATE_FULLY_IDLE
+                                                && conn_cancel_requested.swap(false, Ordering::SeqCst)
+                                            {
+                                                // A halt the caller asked for. The harness stops
+                                                // the turn and reports ordinary idle, so this is
+                                                // the only point at which the two can be told
+                                                // apart (A3, docs/remaining-work.md).
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(
+                                                        anyhow!(crate::error::AntigravityError::Cancelled(
+                                                            "Cancelled by caller".to_string()
+                                                        )),
                                                     ),
                                                 );
                                             }
@@ -1436,6 +1485,27 @@ impl LocalConnectionStrategy {
                     }
                 }
             }
+
+            // The socket is gone. If the turn had not reached idle, the harness
+            // died mid-turn: say so, and quote what it printed on its way out.
+            // Without this the step stream just ends and the caller sees a turn
+            // that produced nothing, with no indication anything went wrong.
+            if !conn_is_idle_for_close.load(Ordering::SeqCst) {
+                let tail = {
+                    let tail = stderr_tail.lock().await;
+                    tail.iter().cloned().collect::<Vec<_>>().join("\n")
+                };
+                let detail = if tail.is_empty() {
+                    "harness exited without writing to stderr".to_string()
+                } else {
+                    format!("last harness stderr:\n{tail}")
+                };
+                let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
+                    "harness connection closed before the turn finished; {detail}"
+                )));
+                conn_is_idle_for_close.store(true, Ordering::SeqCst);
+                let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
+            }
         });
 
         // 10. Hook runners dispatch session start
@@ -1455,6 +1525,7 @@ impl LocalConnectionStrategy {
             hook_runner: self.hook_runner.clone(),
             step_trackers,
             main_trajectory_id: conn_cascade_id,
+            cancel_requested,
             initial_history,
         })
     }

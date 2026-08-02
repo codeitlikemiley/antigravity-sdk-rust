@@ -6,7 +6,7 @@ Every row is a unit of work that can be picked up on its own once its blockers
 are clear. Item IDs match the two plans — read the corresponding section there
 before starting one.
 
-**Status as of 2026-08-02.** 16 items landed: WI-1…WI-8 and WI-14 (merged in
+**Status as of 2026-08-02.** Phase A is complete except A2's `is_idle` flip and A5. 16 items landed: WI-1…WI-8 and WI-14 (merged in
 #8); WP-1, the core of WP-2, the core of WP-6 and C5 (open in #9).
 
 > **The handshake now works.** `connect()` reads
@@ -106,7 +106,7 @@ blocked on the migration.
 | ID | What | Size |
 |---|---|---|
 | wait-for-idle | `Connection` has no `wait_for_idle`; A5 ships an unsound poll loop without it | S |
-| harness-crash-diagnostics | A harness crash ends the step stream silently and the captured stderr is discarded | S |
+| ~~harness-crash-diagnostics~~ | **Done** — landed with A4 | S |
 | predicate-args-fidelity | **`diff_block` done.** Remaining: `SEARCH_DIR`/`RUN_COMMAND` args still carry non-proto result keys (`output`, `combined_output`, `exit_code`) that a predicate cannot rely on before execution | XS |
 | single-consumer-receive-steps | Concurrent `receive_steps()` calls silently split the stream | XS |
 | ask-question-builtin | `BuiltinTools` missing `ASK_QUESTION`; `user_questions.enabled` hardcoded | XS |
@@ -152,8 +152,8 @@ plans.
 |---|---|---|---|---|
 | ~~A1~~ | ~~Main-trajectory tracking~~ — **done** | Replace `parent_idle` + `active_subagent_ids` with `main_trajectory_id` set from the first non-empty `trajectory_id`; return early for non-main trajectories; clear it in `send()` | S | A subagent going idle no longer ends the caller's turn; the `OnceLock` learning heuristic is gone |
 | A2 | Sentinel restructure — **loop half done**; the `StepEvent` enum and C2 remain | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
-| A3 | Cancellation — **harness half done** (`STATE_CANCELLED` arm + `AntigravityError::Cancelled`). Remaining: a client-side `cancel()` that sets a flag so a caller-initiated halt also surfaces as Cancelled rather than a normal end | S | A cancelled turn is distinguishable from a completed one |
-| A4 | Turn-level errors — **done** except the harness-crash stderr tail | S | A turn that fails server-side surfaces an error instead of ending silently |
+| ~~A3~~ | Cancellation — **done**. `Conversation::cancel()` sets a `cancel_requested` flag on the connection; the reader converts the harness's plain `STATE_FULLY_IDLE` into `AntigravityError::Cancelled`, and `send()` clears the flag so it cannot leak into the next turn. Covered by `test_cancel_surfaces_cancelled_error` | S | A cancelled turn is distinguishable from a completed one |
+| ~~A4~~ | Turn-level errors — **done**. The stderr reader keeps a 20-line tail; when the socket closes before idle, the stream yields `harness connection closed before the turn finished` with those lines attached. Covered by `test_harness_crash_surfaces_stderr_tail` | S | A turn that fails server-side surfaces an error instead of ending silently |
 | A5 | WP-6 remainder — **prompt sanitization done**. Remaining: seed `Conversation` from `initial_history`; `env` passthrough; `save_dir` temp default; 127.0.0.1 fallback; `DebugConfig` | M | A resumed conversation starts with its history |
 
 **After Phase A the SDK should complete a real turn against a 0.1.9 harness.**
