@@ -57,6 +57,10 @@ pub struct AgentConfig {
     pub response_schema: Option<String>,
     /// MCP server configurations to connect to external tool servers.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// How the harness retries the model. Unset leaves its own defaults.
+    pub retry_config: Option<crate::types::RetryConfig>,
+    /// What to do when a tool's output is too large for the context.
+    pub tool_output_truncation: Option<crate::types::ToolOutputTruncation>,
     /// Named subagents the model can delegate to.
     ///
     /// Each one's capabilities default to the read-only built-ins, and every
@@ -91,7 +95,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("mcp_servers", &self.mcp_servers)
             .field("subagents", &self.subagents)
             .field("session_continuation_mode", &self.session_continuation_mode)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -360,6 +364,8 @@ impl Agent<Unstarted> {
                     conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
                     mcp_servers: self.config.mcp_servers.clone(),
                     subagents: self.config.subagents.clone(),
+                    retry_config: self.config.retry_config.clone(),
+                    tool_output_truncation: self.config.tool_output_truncation.clone(),
                 };
 
                 let conn = strategy.connect().await?;
@@ -421,6 +427,8 @@ impl Agent<Unstarted> {
                 let strategy = LocalConnectionStrategy {
                     env: self.config.env.clone(),
                     subagents: self.config.subagents.clone(),
+                    retry_config: self.config.retry_config.clone(),
+                    tool_output_truncation: self.config.tool_output_truncation.clone(),
                     ..strategy
                 };
 
@@ -588,6 +596,22 @@ impl<P> AgentBuilder<P> {
 
     pub fn system_instructions(mut self, system_instructions: SystemInstructions) -> Self {
         self.config.system_instructions = Some(system_instructions);
+        self
+    }
+
+    /// Sets how the harness retries the model.
+    #[allow(clippy::missing_const_for_fn)] // consistent with every other builder method
+    pub fn retry_config(mut self, retry_config: crate::types::RetryConfig) -> Self {
+        self.config.retry_config = Some(retry_config);
+        self
+    }
+
+    /// Sets what happens when a tool's output is too large for the context.
+    pub fn tool_output_truncation(
+        mut self,
+        truncation: crate::types::ToolOutputTruncation,
+    ) -> Self {
+        self.config.tool_output_truncation = Some(truncation);
         self
     }
 

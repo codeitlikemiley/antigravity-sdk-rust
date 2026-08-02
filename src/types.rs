@@ -349,6 +349,76 @@ pub struct SubagentConfig {
     pub tools: Vec<String>,
 }
 
+/// How the harness retries the model.
+///
+/// Mirrors upstream `RetryConfig` (`types.py:355-417`). Emitted only when a
+/// sub-config is populated: an all-empty message would override the harness's
+/// own defaults with zeros.
+// `ApiRetryConfig` carries floats, so `Eq` is not available on this graph.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RetryConfig {
+    /// Retries for transport and API failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_retry: Option<ApiRetryConfig>,
+    /// Retries for a model response the harness could not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_output_retry: Option<ModelOutputRetryConfig>,
+}
+
+impl RetryConfig {
+    /// Whether nothing is configured, in which case the field is omitted.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.api_retry.is_none() && self.model_output_retry.is_none()
+    }
+}
+
+/// Retry policy for model API calls.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiRetryConfig {
+    /// How many times to retry before giving up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// How long to wait before the first retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_sleep_duration_ms: Option<u32>,
+    /// Backoff growth factor between attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exponential_multiplier: Option<f64>,
+    /// Random spread applied to each wait, to avoid synchronised retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_range: Option<f64>,
+}
+
+/// Retry policy for unusable model output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelOutputRetryConfig {
+    /// How many times to ask again before giving up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+/// What to do when a tool's output is too large for the context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputTruncation {
+    /// Cut the output down and carry on.
+    Truncate {
+        /// The budget to cut to.
+        max_tokens: i32,
+    },
+    /// Fail the tool call instead, with a message the model can act on.
+    Error {
+        /// The budget above which the call fails.
+        max_tokens: i32,
+        /// What the model is told.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_message: Option<String>,
+    },
+}
+
 /// A structured section appended to system instructions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInstructionSection {

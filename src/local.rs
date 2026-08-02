@@ -492,6 +492,10 @@ pub struct LocalConnectionStrategy {
     pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// How the harness retries the model, on `HarnessConfig.retry_config`.
+    pub retry_config: Option<crate::types::RetryConfig>,
+    /// Tool-output truncation policy, on `HarnessConfig.tool_output_truncation`.
+    pub tool_output_truncation: Option<crate::types::ToolOutputTruncation>,
     /// Named subagents, emitted on `HarnessConfig.custom_subagents`.
     ///
     /// Not a field of [`new`](Self::new) — set it on the struct.
@@ -533,6 +537,8 @@ impl LocalConnectionStrategy {
             conversation_id,
             session_continuation_mode,
             mcp_servers,
+            retry_config: None,
+            tool_output_truncation: None,
             subagents: Vec::new(),
             env: HashMap::new(),
         }
@@ -867,7 +873,9 @@ impl LocalConnectionStrategy {
             session_continuation_mode: self
                 .session_continuation_mode
                 .map(crate::types::SessionContinuationMode::as_proto),
-            retry_config: None,
+            retry_config: crate::harness_config::build_retry_config_proto(
+                self.retry_config.as_ref(),
+            ),
             // Only what a registered hook declared. The harness blocks its
             // turn waiting for a CallHookResponse for every kind named here,
             // and `answer_hook_request` is what makes that safe — emitting this
@@ -879,7 +887,9 @@ impl LocalConnectionStrategy {
                 &registered_tool_names,
             )?,
             mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
-            tool_output_truncation: None,
+            tool_output_truncation: crate::harness_config::build_truncation_proto(
+                self.tool_output_truncation.as_ref(),
+            ),
             models: crate::harness_config::build_models_proto(
                 &self.gemini_config,
                 self.capabilities_config.image_model.as_deref(),

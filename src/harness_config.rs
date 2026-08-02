@@ -867,3 +867,111 @@ mod user_input_tests {
         assert!(!Content::text("").with_slash_command("review").is_empty());
     }
 }
+
+/// Maps [`RetryConfig`](crate::types::RetryConfig) onto the wire.
+///
+/// Returns `None` when nothing is configured. Upstream omits the message
+/// entirely in that case (`local_connection.py:116-121`), and sending an empty
+/// one would replace the harness's own defaults with zeros.
+#[must_use]
+pub fn build_retry_config_proto(
+    retry: Option<&crate::types::RetryConfig>,
+) -> Option<crate::proto::localharness::RetryConfig> {
+    use crate::proto::localharness::{ModelApiRetryConfig, ModelOutputRetryConfig, RetryConfig};
+
+    let retry = retry?;
+    if retry.is_empty() {
+        return None;
+    }
+    Some(RetryConfig {
+        api_retry: retry.api_retry.as_ref().map(|api| ModelApiRetryConfig {
+            max_retries: api.max_retries,
+            initial_sleep_duration_ms: api.initial_sleep_duration_ms,
+            exponential_multiplier: api.exponential_multiplier,
+            jitter_range: api.jitter_range,
+        }),
+        model_output_retry: retry.model_output_retry.as_ref().map(|output| {
+            ModelOutputRetryConfig {
+                max_retries: output.max_retries,
+            }
+        }),
+    })
+}
+
+/// Maps [`ToolOutputTruncation`](crate::types::ToolOutputTruncation) onto the wire.
+#[must_use]
+pub fn build_truncation_proto(
+    truncation: Option<&crate::types::ToolOutputTruncation>,
+) -> Option<crate::proto::localharness::ToolOutputTruncation> {
+    use crate::proto::localharness::{ToolOutputTruncation as Proto, tool_output_truncation};
+    use crate::types::ToolOutputTruncation;
+
+    Some(Proto {
+        strategy: Some(match truncation? {
+            ToolOutputTruncation::Truncate { max_tokens } => {
+                tool_output_truncation::Strategy::Truncate(
+                    tool_output_truncation::TruncateStrategy {
+                        max_tokens: Some(*max_tokens),
+                    },
+                )
+            }
+            ToolOutputTruncation::Error {
+                max_tokens,
+                error_message,
+            } => tool_output_truncation::Strategy::Error(tool_output_truncation::ErrorStrategy {
+                max_tokens: Some(*max_tokens),
+                error_message: error_message.clone(),
+            }),
+        }),
+    })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{build_retry_config_proto, build_truncation_proto};
+    use crate::types::{ApiRetryConfig, RetryConfig, ToolOutputTruncation};
+
+    /// An all-empty message would replace the harness's own defaults with
+    /// zeros, so nothing configured means nothing sent.
+    #[test]
+    fn nothing_configured_emits_nothing() {
+        assert!(build_retry_config_proto(None).is_none());
+        assert!(build_retry_config_proto(Some(&RetryConfig::default())).is_none());
+        assert!(build_truncation_proto(None).is_none());
+    }
+
+    #[test]
+    fn a_populated_api_retry_reaches_the_wire() {
+        let config = RetryConfig {
+            api_retry: Some(ApiRetryConfig {
+                max_retries: Some(5),
+                initial_sleep_duration_ms: Some(250),
+                exponential_multiplier: Some(2.0),
+                jitter_range: Some(0.1),
+            }),
+            model_output_retry: None,
+        };
+        let proto = build_retry_config_proto(Some(&config)).unwrap();
+        let api = proto.api_retry.unwrap();
+        assert_eq!(api.max_retries, Some(5));
+        assert_eq!(api.initial_sleep_duration_ms, Some(250));
+        assert!(proto.model_output_retry.is_none());
+    }
+
+    #[test]
+    fn both_truncation_strategies_map() {
+        use crate::proto::localharness::tool_output_truncation::Strategy;
+        let truncate =
+            build_truncation_proto(Some(&ToolOutputTruncation::Truncate { max_tokens: 1000 }))
+                .unwrap();
+        assert!(matches!(truncate.strategy, Some(Strategy::Truncate(_))));
+
+        let error = build_truncation_proto(Some(&ToolOutputTruncation::Error {
+            max_tokens: 1000,
+            error_message: Some("too big".to_string()),
+        }))
+        .unwrap();
+        assert!(matches!(error.strategy, Some(Strategy::Error(_))));
+    }
+}

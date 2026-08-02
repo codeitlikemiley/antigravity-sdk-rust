@@ -163,7 +163,7 @@ That is the milestone worth cutting a release around.
 
 | # | Batch | Items | Size |
 |---|---|---|---|
-| B1 | Policy ergonomics | S15, N8 | XS |
+| ~~B1~~ | Policy ergonomics — **done** earlier in this branch (`safe_defaults`, `IntoPolicies`, `policy_groups`) | S15, N8 | XS |
 | ~~B2~~ | Hook plumbing module — **done**. H1c (`session_end` from `disconnect`) and H9 (contain an erroring `on_tool_error`) already landed earlier in this branch; H9's shape changed again with H4 | `hook-dispatch`, H1c, H9 | S |
 | ~~B3~~ | Turn hooks — **done** | H1a (`pre_turn` with deny semantics), H12 | S |
 | ~~B4~~ | Conversation drain — **done** | A5 + `wait-for-idle` | M |
@@ -184,7 +184,7 @@ break on its first run.
 | ~~C2~~ | Model resolution — **done**. Explicit → shorthand → defaults, deduped by model type and never by name; an explicit target without an endpoint is an error | M |
 | ~~C3~~ | Model environment — **done**. `GOOGLE_GENAI_USE_VERTEXAI`/`_USE_ENTERPRISE` select Vertex, `GOOGLE_CLOUD_PROJECT`/`_LOCATION` hydrate it, and an env-only key stays off the wire | S |
 | ~~C4~~ | MCP on the wire — **done**. `mcp_server(...)` was a no-op: the builder accepted servers, both strategies stored them, and nothing emitted them, so the model never saw an MCP tool | M |
-| C5 | Retry + truncation | `RetryConfig`, `ToolOutputTruncation` | S |
+| ~~C5~~ | Retry + truncation — **done**. Emitted only when populated: an all-empty message would replace the harness's own defaults with zeros. (The status header above previously credited this as landed in #9; that was a different C5 — the `StepTracker` dedup from the conflict-pass list.) | S |
 | ~~C6~~ | New built-ins — **done**. `SEARCH_WEB`/`READ_URL_CONTENT` are `BuiltinTools`, gate their harness configs, and classify as tool calls so policies see them. `read_only()` gains `READ_URL_CONTENT`, matching upstream 0.1.6 | M |
 | ~~C7~~ | Subagents — **done**, with all three validations: read-only default capabilities, `START_SUBAGENT` dropped with a warning, and an unregistered tool name is an error | L |
 
@@ -220,7 +220,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~E4~~ | Hook proto + router — **done**. `answer_hook_request` answers every path including the ones it does not understand; an unanswered request is a deadlock, not a no-op | L |
 | ~~E5~~ | Turn on `enabled_hooks` — **done**, and only now that the router answers. The field carries exactly what registered hooks declared | S |
 | ~~E6~~ | Public API surface — **done**. `Content`/`ContentPrimitive` existed and reached nothing; they now go out as `complex_user_input`, with a `SlashCommand` variant added. `Connection` gained `send_content` and `wait_for_idle`; `Conversation` gained `send_content`, `chat_content_to_completion`, `cancel` and `last_structured_output` | L |
-| E7 | Docs, examples, drift job — **the drift job is done** (`scripts/check_upstream_drift.py`, weekly + advisory on PRs, verified against the live 0.1.9 release). Docs and examples have been updated batch by batch alongside the code | WP-11 | M |
+| ~~E7~~ | Docs, examples, drift job — **done**. The drift job is the new part (`scripts/check_upstream_drift.py`, weekly + advisory on PRs, verified against the live 0.1.9 release). Docs and examples have been updated batch by batch alongside the code | WP-11 | M |
 
 > **E5 was last, as required.** It landed only after E4's router, because
 > emitting `enabled_hooks` before one exists converts a silent no-op into a

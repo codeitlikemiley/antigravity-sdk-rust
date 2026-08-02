@@ -98,6 +98,10 @@ pub struct WasmConnectionStrategy {
     pub conversation_id: String,
     /// MCP server configurations, emitted on `HarnessConfig.mcp_servers`.
     pub mcp_servers: Vec<crate::types::McpServerConfig>,
+    /// How the harness retries the model, on `HarnessConfig.retry_config`.
+    pub retry_config: Option<crate::types::RetryConfig>,
+    /// Tool-output truncation policy, on `HarnessConfig.tool_output_truncation`.
+    pub tool_output_truncation: Option<crate::types::ToolOutputTruncation>,
     /// Named subagents, emitted on `HarnessConfig.custom_subagents`.
     pub subagents: Vec<crate::types::SubagentConfig>,
 }
@@ -321,7 +325,9 @@ impl WasmConnectionStrategy {
             // and retry, WP-8 hooks, WP-9 MCP and subagents). Explicitly unset
             // so `cargo build` flags them again when those land.
             session_continuation_mode: None,
-            retry_config: None,
+            retry_config: crate::harness_config::build_retry_config_proto(
+                self.retry_config.as_ref(),
+            ),
             // Only what a registered hook declared. The harness blocks its
             // turn waiting for a CallHookResponse for every kind named here,
             // and `answer_hook_request` is what makes that safe — emitting this
@@ -333,7 +339,9 @@ impl WasmConnectionStrategy {
                 &registered_tool_names,
             )?,
             mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
-            tool_output_truncation: None,
+            tool_output_truncation: crate::harness_config::build_truncation_proto(
+                self.tool_output_truncation.as_ref(),
+            ),
             models: crate::harness_config::build_models_proto(
                 &self.gemini_config,
                 self.capabilities_config.image_model.as_deref(),
@@ -1919,6 +1927,8 @@ mod tests {
             conversation_id: "test_traj".to_string(),
             mcp_servers: Vec::new(),
             subagents: Vec::new(),
+            retry_config: None,
+            tool_output_truncation: None,
         };
 
         // Connect
