@@ -1,0 +1,14 @@
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/codee-52695188789e516c.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/from_to_bytes.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/error.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/hybrid.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/from_to_string.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/json_serde.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/option.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/traits.rs
+
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/libcodee-52695188789e516c.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/from_to_bytes.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/error.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/hybrid.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/from_to_string.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/json_serde.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/option.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/traits.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/binary/from_to_bytes.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/error.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/hybrid.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/from_to_string.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/json_serde.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/string/option.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/codee-0.3.5/src/traits.rs:

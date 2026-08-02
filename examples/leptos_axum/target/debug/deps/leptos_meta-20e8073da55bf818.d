@@ -1,0 +1,13 @@
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/leptos_meta-20e8073da55bf818.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/body.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/html.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/link.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/meta_tags.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/script.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/style.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/stylesheet.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/title.rs
+
+/home/user/antigravity-sdk-rust/examples/leptos_axum/target/debug/deps/libleptos_meta-20e8073da55bf818.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/body.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/html.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/link.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/meta_tags.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/script.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/style.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/stylesheet.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/title.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/body.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/html.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/link.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/meta_tags.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/script.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/style.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/stylesheet.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_meta-0.8.6/src/title.rs:

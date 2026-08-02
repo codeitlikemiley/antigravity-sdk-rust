@@ -179,11 +179,12 @@ That is the milestone worth cutting a release around.
 | B4 | Conversation drain | A5 + `wait-for-idle` (the latter is a prerequisite, not optional) | M |
 | B5 | Structured tool results | N3 | M |
 | B6 | Small correctness | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
-| B7 | WP-2 tail + CI subset | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
+| B7 | WP-2 tail (**CI subset done**; `session_end` reply + `callHookRequest` branch remain) | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
 
-**B7 is worth pulling earlier if anything in Phase A or B touches `src/wasm.rs`**
-— CI compiles neither the wasm target nor the docs today, so every wasm mirror
-in this backlog is currently unverified.
+**The CI half of B7 landed early**, after A1 shipped to `src/local.rs` only and
+nothing caught the missing `src/wasm.rs` half. CI now compiles the wasm target,
+the doctests and the three directory examples — it found a genuine wasm-only
+break on its first run.
 
 ### Phase C — capability surface
 

@@ -628,7 +628,6 @@ impl AgentBuilder<HasPolicies> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Builds the effective policy list for an agent.
 ///
 /// Extracted from `Agent::start` so the composition can be tested without a
@@ -697,6 +696,7 @@ fn compose_policies(
     Ok(final_policies)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_default_binary_path() -> Option<String> {
     if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         return Some(path);

@@ -26,6 +26,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # src/wasm.rs is a fork of src/local.rs and is compiled by nothing
+          # else: `--all-targets` builds it only as a host test.
+          targets: wasm32-unknown-unknown
 
       - name: Cache dependencies
         uses: swatinem/rust-cache@v2
@@ -38,3 +41,24 @@ jobs:
 
       - name: Run Tests
         run: cargo test --all-targets --all-features
+
+      # `--all-targets` excludes doctests, so every ``` block in the crate docs
+      # is currently uncompiled.
+      - name: Run doctests
+        run: cargo test --doc
+
+      # The wasm transport duplicates most of the native one. Without this step
+      # a change can land in src/local.rs, miss its src/wasm.rs mirror, and go
+      # unnoticed -- which has already happened once.
+      - name: Check wasm target
+        run: cargo check --target wasm32-unknown-unknown --lib
+
+      # Each of these declares its own workspace, so the root build never sees
+      # them and an API change does not break them until a user hits it.
+      - name: Check directory examples
+        run: |
+          for manifest in examples/*/Cargo.toml; do
+            echo "::group::${manifest}"
+            cargo check --manifest-path "${manifest}" --all-targets
+            echo "::endgroup::"
+          done
