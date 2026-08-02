@@ -1,5 +1,11 @@
 # Remaining work
 
+> **Historical — frozen at 0.2.0.** Every item planned here has shipped. This
+> document is kept for the reasoning behind the changes, not as a status board:
+> it describes what was *planned*, and in places the delivery differed or a
+> decision superseded it. **`CHANGELOG.md` is the record of what shipped**, and
+> the only document that tracks current state.
+
 Executable backlog, derived from `docs/upstream-parity.md` (the 0.1.9 migration)
 and `docs/fix-plan-current-defects.md` (defects against the pinned harness).
 Every row is a unit of work that can be picked up on its own once its blockers

@@ -1,5 +1,11 @@
 # Implementation plan — Phase A (finish the connection)
 
+> **Historical — frozen at 0.2.0.** Every item planned here has shipped. This
+> document is kept for the reasoning behind the changes, not as a status board:
+> it describes what was *planned*, and in places the delivery differed or a
+> decision superseded it. **`CHANGELOG.md` is the record of what shipped**, and
+> the only document that tracks current state.
+
 Written to be executed without re-deriving anything. Batch definitions and the
 rest of the roadmap live in `docs/remaining-work.md` §6; this document carries
 the code-level context for the five batches on the critical path.

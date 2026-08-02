@@ -1,5 +1,11 @@
 # Fix plan — defects in this crate today
 
+> **Historical — frozen at 0.2.0.** Every item planned here has shipped. This
+> document is kept for the reasoning behind the changes, not as a status board:
+> it describes what was *planned*, and in places the delivery differed or a
+> decision superseded it. **`CHANGELOG.md` is the record of what shipped**, and
+> the only document that tracks current state.
+
 Companion to `docs/upstream-parity.md`. That document audits the whole crate
 against upstream 0.1.9 and plans the wire migration (WP-1 … WP-11). **This
 document plans only the subset that is wrong right now, against the harness

@@ -131,6 +131,12 @@ build failure rather than a silent hang.
 
 ### Fixed
 
+- **`scripts/install_harness.sh` installed harness 0.1.1**, whose wire format
+  this SDK no longer speaks — a turn against it never ends, because `STATE_IDLE`
+  was renamed and protojson drops the unknown variant. It now installs 0.1.9,
+  and the drift job fails if that pin ever disagrees with the version the proto
+  was generated from.
+
 - **Workspace sandbox escape.** Containment is decided after resolution — `..`
   is collapsed and symlinks are followed before comparison — and resolution
   failure is treated as outside. It fails closed.

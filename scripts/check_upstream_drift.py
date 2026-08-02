@@ -27,6 +27,7 @@ import argparse
 import io
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,11 +39,34 @@ PACKAGE = "google-antigravity"
 PYPI_JSON = "https://pypi.org/pypi/{package}/json"
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROTO_PATH = REPO_ROOT / "proto" / "localharness.proto"
+INSTALL_SCRIPT = REPO_ROOT / "scripts" / "install_harness.sh"
 GEN_PROTO = REPO_ROOT / "scripts" / "gen_proto.py"
 
 # The version the checked-in proto was generated from. Update this in the same
 # commit that regenerates the proto.
 PINNED_VERSION = "0.1.9"
+
+
+def check_install_script_pin() -> bool:
+    """True when install_harness.sh downloads the version the proto came from."""
+    try:
+        text = INSTALL_SCRIPT.read_text()
+    except OSError as exc:
+        _skip(f"could not read {INSTALL_SCRIPT.name}: {exc}")
+        return True
+    match = re.search(r'^VERSION="([^"]+)"', text, re.MULTILINE)
+    if match is None:
+        _fail(f"{INSTALL_SCRIPT.name} has no VERSION= line to check")
+        return False
+    if match.group(1) != PINNED_VERSION:
+        _fail(
+            f"{INSTALL_SCRIPT.name} installs harness {match.group(1)}, but the "
+            f"proto was generated from {PINNED_VERSION}. The installed harness "
+            f"and the wire format this SDK speaks must be the same version."
+        )
+        return False
+    print(f"OK: {INSTALL_SCRIPT.name} installs the pinned {PINNED_VERSION}")
+    return True
 
 
 def _fail(message: str) -> None:
@@ -149,6 +173,13 @@ def main() -> int:
         return 0
 
     drifted = False
+
+    # The install script downloads the harness developers actually run. It
+    # pinned 0.1.1 for the whole 0.1.9 migration -- so it handed out a harness
+    # this SDK can no longer complete a turn against, and nothing noticed
+    # because the two pins were never compared.
+    if not check_install_script_pin():
+        drifted = True
 
     if parse_version(latest) > parse_version(PINNED_VERSION):
         _fail(

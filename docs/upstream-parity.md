@@ -1,6 +1,12 @@
 # Upstream Parity: antigravity-sdk-rust vs `google-antigravity` 0.1.9
 
-**Status:** audit complete, migration not started.
+> **Historical — frozen at 0.2.0.** Every item planned here has shipped. This
+> document is kept for the reasoning behind the changes, not as a status board:
+> it describes what was *planned*, and in places the delivery differed or a
+> decision superseded it. **`CHANGELOG.md` is the record of what shipped**, and
+> the only document that tracks current state.
+
+**Status:** audit complete; the migration shipped in 0.2.0.
 **Parity target:** upstream `0.1.9`.
 **Port baseline:** upstream `0.1.1` (+ a `ClientInfo` back-port from 0.1.2) — what this crate was written against.
 **Audit date:** 2026-08-01. Nine subsystem audits, each adversarially verified against the extracted wheels and the decoded harness descriptors, then the load-bearing claims reproduced against the shipped 0.1.9 harness binary (§2). 258 findings survived verification: 31 breaking, 62 high, 107 medium, 58 low.

@@ -38,8 +38,9 @@ a compile error rather than a policy that stops matching.
 
 > **Divergence from the Python SDK.** Upstream's identifiers are lowercase
 > (`run_command`, `list_directory`, `search_directory`). A Python policy ported
-> verbatim will not match here. Aligning them is tracked as S8 in
-> `docs/upstream-parity.md`.
+> verbatim will not match here. This is a **standing divergence**, not a pending
+> change: the 0.1.9 audit recorded it as S8 and 0.2.0 shipped without aligning
+> it, so the uppercase spellings are the ones to write against.
 
 ## Decisions
 
@@ -154,4 +155,5 @@ config error rather than a silent no-op.
 
 - `docs/agent.md` — agent configuration
 - `docs/hooks.md` — the hook system policies are built on
-- `docs/upstream-parity.md` — the divergences noted above, with upstream references
+- `docs/upstream-parity.md` — the divergences noted above, with upstream
+  references (historical; frozen at 0.2.0)
