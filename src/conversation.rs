@@ -303,7 +303,19 @@ impl Conversation {
                 StreamChunk::ToolCall(_) => {}
             }
         }
-        let steps = self.history().await;
+        // Steps for THIS turn, not the whole session. `history()` returns
+        // everything, so a long conversation returned the entire transcript on
+        // every reply -- growing without bound and making the field useless for
+        // "what just happened". turn_start_indices is already tracked for this.
+        let steps = {
+            let state = self.state.lock().await;
+            let start = state.turn_start_indices.last().copied().unwrap_or(0);
+            state
+                .steps
+                .get(start..)
+                .map(<[Step]>::to_vec)
+                .unwrap_or_default()
+        };
         let usage_metadata = self.total_usage().await;
         Ok(ChatResponse {
             text,
