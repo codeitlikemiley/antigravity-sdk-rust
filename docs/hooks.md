@@ -58,8 +58,8 @@ pub trait Hook: Send + Sync {
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    /// Called after a turn completes, receiving the full response.
-    async fn post_turn(&self, _response: &ChatResponse) -> Result<(), anyhow::Error> {
+    /// Called when a turn completes, receiving the model's final text.
+    async fn post_turn(&self, _response: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -101,8 +101,9 @@ pub trait Hook: Send + Sync {
 
     // ── History compaction ─────────────────────────────────────────
 
-    /// Called when the conversation history is compacted/summarized.
-    async fn on_compaction(&self, _summary: &str) -> Result<(), anyhow::Error> {
+    /// Called when the conversation history is compacted, receiving the
+    /// compaction step itself.
+    async fn on_compaction(&self, _step: &Step) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }
@@ -143,8 +144,8 @@ pub trait DynHook: Send + Sync {
     fn on_tool_error<'a>(&'a self, error: &'a anyhow::Error) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>>;
     fn on_interaction<'a>(&'a self, questions: &'a [AskQuestionEntry]) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>>;
     fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
-    fn post_turn<'a>(&'a self, response: &'a ChatResponse) -> BoxFuture<'a, Result<(), anyhow::Error>>;
-    fn on_compaction<'a>(&'a self, summary: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn on_compaction<'a>(&'a self, step: &'a Step) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 }
 ```
 
@@ -415,8 +416,8 @@ impl Hook for LoggingHook {
         Ok(())
     }
 
-    async fn post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
-        println!("💬 Response length: {} chars", response.text.len());
+    async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+        println!("💬 Response length: {} chars", response.len());
         Ok(())
     }
 }
@@ -653,3 +654,13 @@ Returning `allow: false` from `pre_turn` stops the prompt from being sent at
 all: `send()` returns the hook's message as an error rather than starting a
 turn that produces nothing. As with `pre_tool_call`, a hook that *errors*
 refuses the turn too.
+
+## When the turn hooks fire
+
+`post_turn` fires at the terminal user-facing model step, carrying that step's
+text. `on_compaction` fires on the compaction step, carrying the step — a hook
+that archives history needs its index and trajectory, not only its summary
+text.
+
+Both were defined and dispatched from nowhere until now; a `post_turn` hook
+simply never ran.

@@ -475,3 +475,61 @@ async fn test_post_tool_call_fires_on_subagent_completion() {
 
     agent.stop().await.expect("stop");
 }
+
+/// `post_turn` was defined and dispatched from nowhere (H1b). It fires at the
+/// terminal user-facing model step, carrying that step's text.
+#[tokio::test]
+async fn test_post_turn_fires_with_the_final_text() {
+    use antigravity_sdk_rust::hooks::Hook;
+    use futures_util::StreamExt;
+    use std::sync::{Arc, Mutex};
+
+    struct CaptureTurn(Arc<Mutex<Vec<String>>>);
+
+    impl Hook for CaptureTurn {
+        async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+            self.0.lock().expect("lock").push(response.to_string());
+            Ok(())
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    config.policies = Some(vec![policy::allow_all()]);
+    config.conversation_id = Some("test-conv-postturn-0123456789abc".to_string());
+    config.hooks = vec![Arc::new(CaptureTurn(seen.clone()))];
+
+    let agent = Agent::new(config).start().await.expect("start");
+    let conversation = agent.conversation();
+    conversation.send("hello").await.expect("send");
+
+    let mut stream = conversation.receive_steps();
+    while stream.next().await.is_some() {}
+
+    // Dispatch is spawned; give it a moment rather than racing it.
+    for _ in 0..50 {
+        if !seen.lock().expect("lock").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let texts = seen.lock().expect("lock").clone();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("How can I help you today?")),
+        "post_turn never fired with the turn's final text; saw {texts:?}"
+    );
+
+    agent.stop().await.expect("stop");
+}

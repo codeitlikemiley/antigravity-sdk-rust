@@ -441,9 +441,8 @@ impl Hook for AuditHook {
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
-        let tokens = response.usage_metadata.as_ref().map_or(0, |u| u.total_token_count);
-        println!("[AUDIT] Turn complete. Tokens: {tokens}");
+    async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+        println!("[AUDIT] Turn complete, {} chars", response.len());
         Ok(())
     }
 }

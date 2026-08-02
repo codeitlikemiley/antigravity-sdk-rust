@@ -1130,6 +1130,30 @@ impl LocalConnectionStrategy {
                                                 http_code,
                                             };
 
+                                            // Turn-level hooks fire off the step that carries the
+                                            // event, which is the only place either is observable
+                                            // from inside the connection (H1b, H1d).
+                                            if let Some(runner) = hook_runner.as_ref() {
+                                                if step.is_complete_response == Some(true) {
+                                                    let runner = runner.clone();
+                                                    let text = step.content.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = runner.dispatch_post_turn(&text).await {
+                                                            tracing::error!("post_turn hook failed: {e:?}");
+                                                        }
+                                                    });
+                                                }
+                                                if step.r#type == StepType::Compaction {
+                                                    let runner = runner.clone();
+                                                    let compacted = step.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = runner.dispatch_on_compaction(&compacted).await {
+                                                            tracing::error!("on_compaction hook failed: {e:?}");
+                                                        }
+                                                    });
+                                                }
+                                            }
+
                                             let _ = step_tx.send(crate::step_extract::StepEvent::Step(Box::new(step)));
 
                                             // Detect platform-level errors (source=SYSTEM) and propagate them.

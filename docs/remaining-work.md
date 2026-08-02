@@ -86,8 +86,8 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | ~~T5~~ | **Done** — absent or empty `arguments_json` is an empty object, not null | XS |
 | W8 | Route all six `ToolResponse` constructions through one function | S |
 | ~~docs-on-tool-error~~ | **Done** — `docs/hooks.md`, both skill references and the skill's hooks example | S |
-| H1b | Dispatch `post_turn`; parameter → `&str` | S |
-| H1d+H16 | Dispatch `on_compaction`; parameter → `&Step` | XS |
+| ~~H1b~~ | **Done** — dispatched at the terminal user-facing model step | S |
+| ~~H1d+H16~~ | **Done** — dispatched on the compaction step, which is what the hook receives | XS |
 | ~~A2~~ | **Done** — per-turn and `Option`; the session total stays on `Conversation::total_usage` | XS |
 | ~~T7+T8~~ | **Done** — duplicate names error from `Agent::start()`; the registry is a `Vec`, so order is registration order | S |
 | T4 | Coerce model-supplied arguments against the tool's JSON Schema | M |
@@ -202,7 +202,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | D5 | `ToolContext` — **T1+T9 and state atomicity done**; X19's example remains (unit tests cover the behaviour) | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | ~~D6~~ | Triggers — **done** | A10, A1, A11 | M |
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
-| D8 | Remaining hook signatures | H1b, H1d+H16 | S |
+| ~~D8~~ | Remaining hook signatures — **done** | H1b, H1d+H16 | S |
 
 > **Before D8, settle the `HookContext` question.** The maintainer chose to ship
 > the `Hook` break now and accept a second one later (§8.3), so D8's release

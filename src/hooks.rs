@@ -3,9 +3,7 @@
 //! This module defines the [`Hook`] trait, which allows implementing custom observers and middlewares
 //! to intercept session startup, pre/post tool invocations, execution errors, and user interactions.
 
-use crate::types::{
-    AskQuestionEntry, ChatResponse, HookResult, QuestionHookResult, ToolCall, ToolResult,
-};
+use crate::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
@@ -82,17 +80,26 @@ pub trait Hook: Send + Sync {
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
-    /// Triggered after a turn completes, receiving the full response.
+    /// Triggered when a turn completes, receiving the model's final text.
+    ///
+    /// Takes the text rather than a `ChatResponse`: the dispatch happens at the
+    /// terminal user-facing model step, inside the connection, where no
+    /// `ChatResponse` exists yet. Building one there would have meant a second,
+    /// partly-filled shape with the same name.
     fn post_turn<'a>(
         &'a self,
-        _response: &'a ChatResponse,
+        _response: &'a str,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
     /// Triggered when the conversation history is compacted/summarized.
+    ///
+    /// Receives the compaction step itself, not just its text — a hook that
+    /// archives history needs the step's index and trajectory to know what was
+    /// replaced.
     fn on_compaction<'a>(
         &'a self,
-        _summary: &'a str,
+        _step: &'a crate::types::Step,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -136,13 +143,13 @@ pub trait DynHook: Send + Sync {
     fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
 
     /// Triggered after a turn completes.
-    fn post_turn<'a>(
-        &'a self,
-        response: &'a ChatResponse,
-    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
     /// Triggered when the conversation history is compacted.
-    fn on_compaction<'a>(&'a self, summary: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn on_compaction<'a>(
+        &'a self,
+        step: &'a crate::types::Step,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 }
 
 impl<T: Hook + ?Sized> DynHook for T {
@@ -186,15 +193,15 @@ impl<T: Hook + ?Sized> DynHook for T {
         Box::pin(async move { self.on_session_end().await })
     }
 
-    fn post_turn<'a>(
-        &'a self,
-        response: &'a ChatResponse,
-    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>> {
         Box::pin(async move { self.post_turn(response).await })
     }
 
-    fn on_compaction<'a>(&'a self, summary: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.on_compaction(summary).await })
+    fn on_compaction<'a>(
+        &'a self,
+        step: &'a crate::types::Step,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_compaction(step).await })
     }
 }
 
@@ -346,7 +353,7 @@ impl HookRunner {
     }
 
     /// Dispatches `post_turn` to all registered hooks.
-    pub async fn dispatch_post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
+    pub async fn dispatch_post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
             hook.post_turn(response).await?;
@@ -355,10 +362,13 @@ impl HookRunner {
     }
 
     /// Dispatches `on_compaction` to all registered hooks.
-    pub async fn dispatch_on_compaction(&self, summary: &str) -> Result<(), anyhow::Error> {
+    pub async fn dispatch_on_compaction(
+        &self,
+        step: &crate::types::Step,
+    ) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.on_compaction(summary).await?;
+            hook.on_compaction(step).await?;
         }
         Ok(())
     }
@@ -373,7 +383,7 @@ mod tests {
         clippy::field_reassign_with_default
     )]
     use super::*;
-    use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult, UsageMetadata};
+    use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult};
     use std::sync::Mutex;
 
     /// A hook whose gate cannot decide. Before S2 this ran the tool.
@@ -510,7 +520,7 @@ mod tests {
             Ok(())
         }
 
-        async fn post_turn(&self, _response: &ChatResponse) -> Result<(), anyhow::Error> {
+        async fn post_turn(&self, _response: &str) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -518,7 +528,7 @@ mod tests {
             Ok(())
         }
 
-        async fn on_compaction(&self, _summary: &str) -> Result<(), anyhow::Error> {
+        async fn on_compaction(&self, _step: &crate::types::Step) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -799,13 +809,7 @@ mod tests {
             }))
             .await;
 
-        let response = ChatResponse {
-            text: "hello".to_string(),
-            thinking: String::new(),
-            steps: vec![],
-            usage_metadata: Some(UsageMetadata::default()),
-        };
-        runner.dispatch_post_turn(&response).await.unwrap();
+        runner.dispatch_post_turn("hello").await.unwrap();
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded, vec!["h1:post_turn"]);
@@ -828,7 +832,12 @@ mod tests {
             }))
             .await;
 
-        runner.dispatch_on_compaction("summary text").await.unwrap();
+        let step = crate::types::Step {
+            r#type: crate::types::StepType::Compaction,
+            content: "summary text".to_string(),
+            ..Default::default()
+        };
+        runner.dispatch_on_compaction(&step).await.unwrap();
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded, vec!["h1:on_compaction", "h2:on_compaction"]);
