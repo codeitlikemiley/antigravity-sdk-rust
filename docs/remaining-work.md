@@ -107,7 +107,7 @@ blocked on the migration.
 |---|---|---|
 | wait-for-idle | `Connection` has no `wait_for_idle`; A5 ships an unsound poll loop without it | S |
 | harness-crash-diagnostics | A harness crash ends the step stream silently and the captured stderr is discarded | S |
-| predicate-args-fidelity | Policy predicate args drop `ActionEditFile.diff_block` and inject non-proto keys | S |
+| predicate-args-fidelity | **`diff_block` done.** Remaining: `SEARCH_DIR`/`RUN_COMMAND` args still carry non-proto result keys (`output`, `combined_output`, `exit_code`) that a predicate cannot rely on before execution | XS |
 | single-consumer-receive-steps | Concurrent `receive_steps()` calls silently split the stream | XS |
 | ask-question-builtin | `BuiltinTools` missing `ASK_QUESTION`; `user_questions.enabled` hardcoded | XS |
 

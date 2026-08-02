@@ -84,8 +84,13 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
     } else if let Some(ref edit) = step_update.edit_file {
         (
             "EDIT_FILE",
+            // diff_block is the edit itself. Dropping it meant a policy
+            // predicate on EDIT_FILE could see which file was being changed but
+            // not what the change was — so a rule like "deny edits that remove
+            // a licence header" could not be written at all.
             serde_json::json!({
                 "file_path": edit.file_path,
+                "diff_block": edit.diff_block,
             }),
         )
     } else if let Some(ref search) = step_update.search_directory {

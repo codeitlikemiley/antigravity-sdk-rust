@@ -1403,7 +1403,10 @@ mod tests {
         assert_eq!(
             tc.args,
             serde_json::json!({
-                "file_path": "edit_path"
+                "file_path": "edit_path",
+                // The edit itself, so a policy predicate can inspect the change
+                // and not just the path.
+                "diff_block": []
             })
         );
 
