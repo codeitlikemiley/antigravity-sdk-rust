@@ -12,6 +12,16 @@ use std::sync::Arc;
 /// Implementors can register hooks via [`Agent::register_hook`](crate::agent::Agent::register_hook)
 /// to audit tool invocations, log events, or restrict actions dynamically.
 pub trait Hook: Send + Sync {
+    /// Which lifecycle hooks this implementation wants the **harness** to call.
+    ///
+    /// Opt-in, and unrelated to local dispatch: every method is called by the
+    /// runner regardless. Declaring a kind is what puts it in
+    /// `HarnessConfig.enabled_hooks`, and the harness then blocks its turn
+    /// waiting for an answer — so declare only what you handle.
+    fn declares(&self) -> crate::hook_dispatch::HookKinds {
+        crate::hook_dispatch::HookKinds::NONE
+    }
+
     /// Triggered when the agent establishes a connection and starts a session.
     fn on_session_start(
         &self,
@@ -109,6 +119,9 @@ pub trait Hook: Send + Sync {
 ///
 /// This trait is used internally by the SDK to allow dynamic dispatch and storage of hooks.
 pub trait DynHook: Send + Sync {
+    /// Which lifecycle hooks this implementation wants the harness to call.
+    fn declares(&self) -> crate::hook_dispatch::HookKinds;
+
     /// Triggered when the agent establishes a connection and starts a session.
     fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
 
@@ -153,6 +166,10 @@ pub trait DynHook: Send + Sync {
 }
 
 impl<T: Hook + ?Sized> DynHook for T {
+    fn declares(&self) -> crate::hook_dispatch::HookKinds {
+        self.declares()
+    }
+
     fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
         Box::pin(async move { self.on_session_start().await })
     }
@@ -229,6 +246,20 @@ impl HookRunner {
 
     pub async fn register(&self, hook: Arc<dyn DynHook>) {
         self.hooks.write().await.push(hook);
+    }
+
+    /// The union of every registered hook's declared kinds.
+    ///
+    /// What `HarnessConfig.enabled_hooks` is built from once the harness-side
+    /// router exists. Emitting it before then would deadlock the turn: the
+    /// harness blocks waiting for a `CallHookResponse` nothing can send.
+    pub async fn declared_kinds(&self) -> crate::hook_dispatch::HookKinds {
+        let hooks = self.hooks.read().await.clone();
+        let mut kinds = crate::hook_dispatch::HookKinds::NONE;
+        for hook in &hooks {
+            kinds |= hook.declares();
+        }
+        kinds
     }
 
     pub async fn dispatch_session_start(&self) -> Result<(), anyhow::Error> {

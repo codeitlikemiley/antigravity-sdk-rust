@@ -214,8 +214,8 @@ maintainer's §8.3 decisions both assume one break, not several.
 
 | # | Batch | Items | Size |
 |---|---|---|---|
-| E1 | Hook kind registry | H3 — `declares() -> HookKinds`, the prerequisite for `enabled_hooks` | M |
-| E2 | Shared state store | `StateStore`, rebuilding `HookContext` and `ToolContext` on it (H13) | M |
+| ~~E1~~ | Hook kind registry — **done**. `HookKinds` is opt-in and covers exactly the seven `LifecycleHook` members; `on_interaction`/`on_compaction` have none, so they stay local-only | M |
+| ~~E2~~ | Shared state store — **done**. `src/state.rs`; both contexts delegate. The two stores stay separate data, deliberately | M |
 | E3 | Hook context threading | H5 — the context parameter on every `Hook` method | L |
 | E4 | Hook proto + router | H2 — `CallHookRequest`/`Response`, the 7-entry table, always-answer guarantee | L |
 | E5 | Turn on `enabled_hooks` | Emit field 16; reduce the confirmation arm to an unconditional accept | S |

@@ -664,3 +664,40 @@ text.
 
 Both were defined and dispatched from nowhere until now; a `post_turn` hook
 simply never ran.
+
+## Declaring hook kinds
+
+`Hook::declares()` returns the `HookKinds` an implementation wants the
+**harness** to call. It is opt-in and defaults to `NONE`.
+
+This does not affect local dispatch: every method is called by the runner
+either way. Declaring is what will put a kind into
+`HarnessConfig.enabled_hooks`, and the harness then blocks its turn waiting for
+an answer — so declare only what you handle.
+
+```rust,no_run
+# use antigravity_sdk_rust::hooks::Hook;
+# use antigravity_sdk_rust::hook_dispatch::HookKinds;
+# struct Audit;
+impl Hook for Audit {
+    fn declares(&self) -> HookKinds {
+        HookKinds::PRE_TOOL | HookKinds::POST_TOOL
+    }
+}
+```
+
+`enabled_hooks` is **not emitted yet** — the harness-side router does not exist,
+and emitting the field before it does would deadlock the turn rather than being
+a no-op.
+
+## Hook and tool state
+
+Both `HookContext` and `ToolContext` are built on the same `StateStore`, which
+provides `get`, `set` and an atomic `update`. They remain **separate stores**:
+sharing the type is not sharing the data, and a hook should not silently depend
+on a tool's bookkeeping.
+
+`HookContext` additionally chains to a parent — `get` walks up, `set` and
+`update` stay local. `update` deliberately does not walk: a read-modify-write
+that fell through to a parent would write its result locally and leave the
+parent stale, which reads as a lost update.

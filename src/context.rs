@@ -4,10 +4,9 @@
 //! and `set()` writes only to the local store. This enables state sharing across
 //! hook lifecycle events (session → turn → operation scope).
 
+use crate::state::StateStore;
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// A hierarchical key-value store for sharing state across hook invocations.
 ///
@@ -17,7 +16,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct HookContext {
     parent: Option<Arc<Self>>,
-    store: Arc<Mutex<HashMap<String, Value>>>,
+    store: StateStore,
 }
 
 impl HookContext {
@@ -25,7 +24,7 @@ impl HookContext {
     pub fn new() -> Self {
         Self {
             parent: None,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: StateStore::new(),
         }
     }
 
@@ -34,33 +33,35 @@ impl HookContext {
     pub fn child(parent: Arc<Self>) -> Self {
         Self {
             parent: Some(parent),
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: StateStore::new(),
         }
     }
 
     /// Retrieves a value by key, walking up the parent chain if not found locally.
     /// Returns `None` if the key is not found in any context in the hierarchy.
-    #[allow(clippy::collapsible_if)]
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        // Check local store first
-        if let Ok(store) = self.store.lock() {
-            if let Some(value) = store.get(key) {
-                return serde_json::from_value(value.clone()).ok();
-            }
-        }
-        // Walk up parent chain
-        self.parent.as_ref().and_then(|p| p.get(key))
+        self.store
+            .get(key)
+            .or_else(|| self.parent.as_ref().and_then(|parent| parent.get(key)))
     }
 
     /// Sets a value in the **local** store only (does not write to parents).
     /// If the key already exists locally, it is overwritten.
-    #[allow(clippy::collapsible_if)]
     pub fn set<T: Serialize>(&self, key: &str, value: T) {
-        if let Ok(mut store) = self.store.lock() {
-            if let Ok(v) = serde_json::to_value(value) {
-                store.insert(key.to_string(), v);
-            }
-        }
+        self.store.set(key, value);
+    }
+
+    /// Atomically reads, transforms and writes a **local** entry.
+    ///
+    /// Does not walk the parent chain: a read-modify-write that fell through to
+    /// a parent would write the result locally and leave the parent stale,
+    /// which reads as a lost update.
+    pub fn update<T, F>(&self, key: &str, transform: F)
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce(Option<T>) -> Option<T>,
+    {
+        self.store.update(key, transform);
     }
 
     /// Returns `true` if this context has a parent (i.e., is not a root/session context).

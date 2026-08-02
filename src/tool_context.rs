@@ -6,11 +6,9 @@
 
 use crate::connection::Connection;
 use crate::connection::WeakConnection;
+use crate::state::StateStore;
 use anyhow::Result;
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Session-scoped context injected into tools that need conversation awareness.
 ///
@@ -25,7 +23,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub struct ToolContext {
     connection: WeakConnection,
-    state: Mutex<HashMap<String, Value>>,
+    state: StateStore,
 }
 
 impl ToolContext {
@@ -36,8 +34,16 @@ impl ToolContext {
     pub fn new(connection: WeakConnection) -> Self {
         Self {
             connection,
-            state: Mutex::new(HashMap::new()),
+            state: StateStore::new(),
         }
+    }
+
+    /// The session store backing this context.
+    ///
+    /// Cloning it shares the entries, so a caller can read what a tool wrote.
+    #[must_use]
+    pub fn state(&self) -> StateStore {
+        self.state.clone()
     }
 
     /// Returns the conversation ID, or `None` once the session has ended.
@@ -69,21 +75,12 @@ impl ToolContext {
     /// Retrieves a previously stored value by key.
     /// Returns `None` if the key doesn't exist or deserialization fails.
     pub fn get_state<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.state
-            .lock()
-            .ok()
-            .and_then(|store| store.get(key).cloned())
-            .and_then(|v| serde_json::from_value(v).ok())
+        self.state.get(key)
     }
 
     /// Stores a value by key in the session-scoped state store.
-    #[allow(clippy::collapsible_if)]
     pub fn set_state<T: Serialize>(&self, key: &str, value: T) {
-        if let Ok(mut store) = self.state.lock() {
-            if let Ok(v) = serde_json::to_value(value) {
-                store.insert(key.to_string(), v);
-            }
-        }
+        self.state.set(key, value);
     }
 
     /// Atomically reads, transforms and writes a state entry.
@@ -108,99 +105,57 @@ impl ToolContext {
         T: Serialize + DeserializeOwned,
         F: FnOnce(Option<T>) -> Option<T>,
     {
-        update_locked(&self.state, key, transform);
-    }
-}
-
-/// The read-modify-write half of [`ToolContext::update_state`], separated so it
-/// can be tested without a live connection.
-fn update_locked<T, F>(state: &Mutex<HashMap<String, Value>>, key: &str, transform: F)
-where
-    T: Serialize + DeserializeOwned,
-    F: FnOnce(Option<T>) -> Option<T>,
-{
-    let Ok(mut store) = state.lock() else {
-        return;
-    };
-    let current = store
-        .get(key)
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok());
-    if let Some(next) = transform(current)
-        && let Ok(v) = serde_json::to_value(next)
-    {
-        store.insert(key.to_string(), v);
+        self.state.update(key, transform);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::significant_drop_tightening
-    )]
-    use super::*;
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::ToolContext;
+    use crate::connection::{AnyConnection, MockConnection};
     use std::sync::Arc;
 
-    // ToolContext tests require a mock connection which is only available
-    // via the full test harness. Unit tests here validate the state store.
-    #[test]
-    fn test_state_set_and_get() {
-        let state: Mutex<HashMap<String, Value>> = Mutex::new(HashMap::new());
-        state
-            .lock()
-            .unwrap()
-            .insert("key".to_string(), serde_json::to_value("value").unwrap());
-        let val: String =
-            serde_json::from_value(state.lock().unwrap().get("key").cloned().unwrap()).unwrap();
-        assert_eq!(val, "value");
+    fn context() -> (Arc<MockConnection>, AnyConnection, ToolContext) {
+        let mock = Arc::new(MockConnection::new("conv-1"));
+        let any = AnyConnection::Mock(mock.clone());
+        let context = ToolContext::new(any.downgrade());
+        (mock, any, context)
     }
 
     #[test]
-    fn test_state_overwrite() {
-        let state: Mutex<HashMap<String, Value>> = Mutex::new(HashMap::new());
-        {
-            let mut store = state.lock().unwrap();
-            store.insert("key".to_string(), serde_json::to_value(1i32).unwrap());
-            store.insert("key".to_string(), serde_json::to_value(2i32).unwrap());
-        }
-        let val: i32 =
-            serde_json::from_value(state.lock().unwrap().get("key").cloned().unwrap()).unwrap();
-        assert_eq!(val, 2);
-    }
-
-    /// The point of the method: a read-modify-write that cannot interleave.
-    /// A `get_state` + `set_state` pair releases the lock in between, so a
-    /// concurrent increment is lost — 800 here would come out lower.
-    #[test]
-    fn update_locked_is_atomic_across_threads() {
-        let state: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let state = state.clone();
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..100 {
-                    update_locked::<u32, _>(&state, "n", |c| Some(c.unwrap_or(0) + 1));
-                }
-            }));
-        }
-        for h in handles {
-            h.join().ok();
-        }
-        let stored: u32 =
-            serde_json::from_value(state.lock().unwrap().get("n").cloned().unwrap()).unwrap();
-        assert_eq!(stored, 800);
+    fn state_round_trips_through_the_shared_store() {
+        let (_mock, _any, context) = context();
+        context.set_state("key", "value");
+        assert_eq!(context.get_state::<String>("key").as_deref(), Some("value"));
+        context.update_state::<u32, _>("calls", |c| Some(c.unwrap_or(0) + 1));
+        context.update_state::<u32, _>("calls", |c| Some(c.unwrap_or(0) + 1));
+        assert_eq!(context.get_state::<u32>("calls"), Some(2));
+        // The handle sees the same entries.
+        assert_eq!(context.state().get::<u32>("calls"), Some(2));
     }
 
     #[test]
-    fn update_locked_returning_none_leaves_the_entry() {
-        let state: Mutex<HashMap<String, Value>> = Mutex::new(HashMap::new());
-        update_locked::<u32, _>(&state, "k", |_| Some(7));
-        update_locked::<u32, _>(&state, "k", |_| None);
-        let stored: u32 =
-            serde_json::from_value(state.lock().unwrap().get("k").cloned().unwrap()).unwrap();
-        assert_eq!(stored, 7);
+    fn conversation_id_and_idle_track_the_connection() {
+        let (mock, any, context) = context();
+        assert_eq!(context.conversation_id().as_deref(), Some("conv-1"));
+        assert_eq!(context.is_idle(), Some(true));
+
+        // Once the session is gone the context reports nothing rather than
+        // keeping it alive.
+        drop(any);
+        drop(mock);
+        assert_eq!(context.conversation_id(), None);
+        assert_eq!(context.is_idle(), None);
+    }
+
+    #[tokio::test]
+    async fn send_errors_once_the_session_has_ended() {
+        let (mock, any, context) = context();
+        context.send("wake up").await.expect("live session");
+        drop(any);
+        drop(mock);
+        let err = context.send("wake up").await.expect_err("session is gone");
+        assert!(err.to_string().contains("session has ended"), "{err}");
     }
 }
