@@ -41,12 +41,12 @@ pub trait Hook: Send + Sync {
     // ── Session lifecycle ──────────────────────────────────────────
 
     /// Called when the agent establishes a connection and starts a session.
-    async fn on_session_start(&self) -> Result<(), anyhow::Error> {
+    async fn on_session_start(&self, _context: &HookContext) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
     /// Called when the session is ending (agent shutdown or disconnect).
-    async fn on_session_end(&self) -> Result<(), anyhow::Error> {
+    async fn on_session_end(&self, _context: &HookContext) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -54,12 +54,12 @@ pub trait Hook: Send + Sync {
 
     /// Intercepts the start of a user turn before the LLM processes the prompt.
     /// Return `allow: false` to halt execution.
-    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+    async fn pre_turn(&self, _context: &HookContext) -> Result<HookResult, anyhow::Error> {
         Ok(HookResult { allow: true, message: String::new() })
     }
 
     /// Called when a turn completes, receiving the model's final text.
-    async fn post_turn(&self, _response: &str) -> Result<(), anyhow::Error> {
+    async fn post_turn(&self, _response: &str, _context: &HookContext) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -67,12 +67,12 @@ pub trait Hook: Send + Sync {
 
     /// Intercepts a tool call before execution.
     /// Return `allow: false` to prevent the tool from running.
-    async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(&self, _tool_call: &ToolCall, ctx: &HookContext) -> Result<HookResult, anyhow::Error> {
         Ok(HookResult { allow: true, message: String::new() })
     }
 
     /// Called after a tool successfully returns a result.
-    async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
+    async fn post_tool_call(&self, _result: &ToolResult, ctx: &HookContext) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -103,7 +103,7 @@ pub trait Hook: Send + Sync {
 
     /// Called when the conversation history is compacted, receiving the
     /// compaction step itself.
-    async fn on_compaction(&self, _step: &Step) -> Result<(), anyhow::Error> {
+    async fn on_compaction(&self, _step: &Step, _context: &HookContext) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }
@@ -137,15 +137,15 @@ use antigravity_sdk_rust::types::{HookResult, ToolCall, ToolResult, ChatResponse
 
 /// Object-safe version of `Hook`, used internally for dynamic dispatch.
 pub trait DynHook: Send + Sync {
-    fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
-    fn pre_turn(&self) -> BoxFuture<'_, Result<HookResult, anyhow::Error>>;
+    fn on_session_start<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn pre_turn<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<HookResult, anyhow::Error>>;
     fn pre_tool_call<'a>(&'a self, tool_call: &'a ToolCall) -> BoxFuture<'a, Result<HookResult, anyhow::Error>>;
     fn post_tool_call<'a>(&'a self, result: &'a ToolResult) -> BoxFuture<'a, Result<(), anyhow::Error>>;
     fn on_tool_error<'a>(&'a self, error: &'a anyhow::Error) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>>;
     fn on_interaction<'a>(&'a self, questions: &'a [AskQuestionEntry]) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>>;
-    fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
-    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
-    fn on_compaction<'a>(&'a self, step: &'a Step) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn on_session_end<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn post_turn<'a>(&'a self, response: &'a str, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn on_compaction<'a>(&'a self, step: &'a Step, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 }
 ```
 
@@ -396,27 +396,27 @@ use antigravity_sdk_rust::types::{ChatResponse, HookResult, ToolCall, ToolResult
 struct LoggingHook;
 
 impl Hook for LoggingHook {
-    async fn on_session_start(&self) -> Result<(), anyhow::Error> {
+    async fn on_session_start(&self, _context: &HookContext) -> Result<(), anyhow::Error> {
         println!("🟢 Session started");
         Ok(())
     }
 
-    async fn on_session_end(&self) -> Result<(), anyhow::Error> {
+    async fn on_session_end(&self, _context: &HookContext) -> Result<(), anyhow::Error> {
         println!("🔴 Session ended");
         Ok(())
     }
 
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(&self, tool_call: &ToolCall, ctx: &HookContext) -> Result<HookResult, anyhow::Error> {
         println!("🔧 Calling tool: {}", tool_call.name);
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
+    async fn post_tool_call(&self, result: &ToolResult, ctx: &HookContext) -> Result<(), anyhow::Error> {
         println!("✅ Tool {} completed", result.name);
         Ok(())
     }
 
-    async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+    async fn post_turn(&self, response: &str, ctx: &HookContext) -> Result<(), anyhow::Error> {
         println!("💬 Response length: {} chars", response.len());
         Ok(())
     }
@@ -447,7 +447,7 @@ impl RateLimitHook {
 }
 
 impl Hook for RateLimitHook {
-    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+    async fn pre_turn(&self, _context: &HookContext) -> Result<HookResult, anyhow::Error> {
         let count = self.turn_count.fetch_add(1, Ordering::SeqCst);
         if count >= self.max_turns {
             Ok(HookResult {
@@ -492,12 +492,12 @@ impl AuditHook {
 }
 
 impl Hook for AuditHook {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(&self, tool_call: &ToolCall, ctx: &HookContext) -> Result<HookResult, anyhow::Error> {
         println!("📝 Audit: tool '{}' invoked", tool_call.name);
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
+    async fn post_tool_call(&self, result: &ToolResult, ctx: &HookContext) -> Result<(), anyhow::Error> {
         let record = AuditRecord {
             tool_name: result.name.clone(),
             success: result.error.is_none(),
@@ -583,7 +583,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 struct LoggingHook;
 impl antigravity_sdk_rust::hooks::Hook for LoggingHook {
-    async fn on_session_start(&self) -> Result<(), anyhow::Error> {
+    async fn on_session_start(&self, _context: &HookContext) -> Result<(), anyhow::Error> {
         println!("Session started");
         Ok(())
     }
@@ -621,7 +621,7 @@ inside the tool, where it can decide whether the fallback is honest.
 struct Explain;
 
 impl Hook for Explain {
-    async fn on_tool_error(&self, error: &anyhow::Error) -> Result<Option<String>, anyhow::Error> {
+    async fn on_tool_error(&self, error: &anyhow::Error, ctx: &HookContext) -> Result<Option<String>, anyhow::Error> {
         if error.to_string().contains("response too large") {
             // The model can act on this; it cannot act on a stack trace.
             return Ok(Some("the result was too large — request fewer rows".to_string()));
@@ -725,3 +725,37 @@ could not get it at all.
 
 Anything the SDK does not recognise still falls back to the step's text, so an
 unfamiliar built-in degrades rather than disappearing.
+
+## Every hook method receives a `HookContext`
+
+The context is session-scoped and shared across dispatches, so a hook can record
+something in `on_session_start` and read it in `pre_tool_call` without holding
+state of its own:
+
+```rust,no_run
+# use antigravity_sdk_rust::hooks::Hook;
+# use antigravity_sdk_rust::context::HookContext;
+# use antigravity_sdk_rust::types::{HookResult, ToolCall};
+struct BudgetGate;
+
+impl Hook for BudgetGate {
+    async fn pre_tool_call(
+        &self,
+        _tool_call: &ToolCall,
+        context: &HookContext,
+    ) -> Result<HookResult, anyhow::Error> {
+        context.update::<u32, _>("calls", |c| Some(c.unwrap_or(0) + 1));
+        let calls: u32 = context.get("calls").unwrap_or(0);
+        Ok(HookResult {
+            allow: calls <= 50,
+            message: "tool budget exhausted for this session".to_string(),
+        })
+    }
+}
+```
+
+`HookRunner::context()` exposes the same store, so a caller can seed it before
+starting or read what hooks recorded afterwards.
+
+**This is the second `Hook` break**, and it was expected: the release notes for
+the first one said so explicitly rather than claiming the trait was settled.

@@ -216,7 +216,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 |---|---|---|---|
 | ~~E1~~ | Hook kind registry — **done**. `HookKinds` is opt-in and covers exactly the seven `LifecycleHook` members; `on_interaction`/`on_compaction` have none, so they stay local-only | M |
 | ~~E2~~ | Shared state store — **done**. `src/state.rs`; both contexts delegate. The two stores stay separate data, deliberately | M |
-| E3 | Hook context threading | H5 — the context parameter on every `Hook` method | L |
+| ~~E3~~ | Hook context threading — **done**. Every method takes `&HookContext`; the runner owns one session-scoped store, so a hook can record in one event and read in the next | L |
 | ~~E4~~ | Hook proto + router — **done**. `answer_hook_request` answers every path including the ones it does not understand; an unanswered request is a deadlock, not a no-op | L |
 | ~~E5~~ | Turn on `enabled_hooks` — **done**, and only now that the router answers. The field carries exactly what registered hooks declared | S |
 | E6 | Public API surface | WP-10: multimodal prompts, slash commands, `Connection` trait | L |

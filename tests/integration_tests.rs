@@ -426,7 +426,11 @@ async fn test_post_tool_call_fires_on_subagent_completion() {
     struct CaptureHook(Arc<Mutex<Vec<ToolResult>>>);
 
     impl Hook for CaptureHook {
-        async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
+        async fn post_tool_call(
+            &self,
+            result: &ToolResult,
+            _context: &antigravity_sdk_rust::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.0.lock().expect("lock").push(result.clone());
             Ok(())
         }
@@ -487,7 +491,11 @@ async fn test_post_turn_fires_with_the_final_text() {
     struct CaptureTurn(Arc<Mutex<Vec<String>>>);
 
     impl Hook for CaptureTurn {
-        async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+        async fn post_turn(
+            &self,
+            response: &str,
+            _context: &antigravity_sdk_rust::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.0.lock().expect("lock").push(response.to_string());
             Ok(())
         }

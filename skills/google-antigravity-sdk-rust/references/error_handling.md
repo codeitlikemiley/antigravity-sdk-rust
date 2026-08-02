@@ -24,8 +24,9 @@ use antigravity_sdk_rust::types::{AskQuestionEntry, HookResult, QuestionHookResu
 
 pub trait Hook: Send + Sync {
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(
-        &self,
+    fn on_session_start<'a>(
+        &'a self,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -48,6 +49,7 @@ pub trait Hook: Send + Sync {
     fn pre_tool_call<'a>(
         &'a self,
         _tool_call: &'a ToolCall,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
         async {
             Ok(HookResult {
@@ -61,6 +63,7 @@ pub trait Hook: Send + Sync {
     fn post_tool_call<'a>(
         &'a self,
         _result: &'a ToolResult,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -69,6 +72,7 @@ pub trait Hook: Send + Sync {
     fn on_tool_error<'a>(
         &'a self,
         _error: &'a anyhow::Error,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
         // `Some(message)` replaces the error text shown to the model;
         // `None` leaves it. A failure cannot be turned into a success.
@@ -121,6 +125,7 @@ impl Hook for DiagnosticLogger {
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
         async move {
             eprintln!("[HOOK ERROR] Tool failed: {}", error);

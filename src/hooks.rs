@@ -3,6 +3,7 @@
 //! This module defines the [`Hook`] trait, which allows implementing custom observers and middlewares
 //! to intercept session startup, pre/post tool invocations, execution errors, and user interactions.
 
+use crate::context::HookContext;
 use crate::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
@@ -23,15 +24,17 @@ pub trait Hook: Send + Sync {
     }
 
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(
-        &self,
+    fn on_session_start<'a>(
+        &'a self,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
     /// Intercepts the start of a user turn before the LLM processes the prompt.
     /// Returns `allow: false` to halt execution.
-    fn pre_turn(
-        &self,
+    fn pre_turn<'a>(
+        &'a self,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
         async {
             Ok(HookResult {
@@ -45,6 +48,7 @@ pub trait Hook: Send + Sync {
     fn pre_tool_call<'a>(
         &'a self,
         _tool_call: &'a ToolCall,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
         async {
             Ok(HookResult {
@@ -57,6 +61,7 @@ pub trait Hook: Send + Sync {
     fn post_tool_call<'a>(
         &'a self,
         _result: &'a ToolResult,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -73,6 +78,7 @@ pub trait Hook: Send + Sync {
     fn on_tool_error<'a>(
         &'a self,
         _error: &'a anyhow::Error,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
         async { Ok(None) }
     }
@@ -80,13 +86,15 @@ pub trait Hook: Send + Sync {
     fn on_interaction<'a>(
         &'a self,
         _questions: &'a [AskQuestionEntry],
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<Option<QuestionHookResult>, anyhow::Error>> + Send
     {
         async { Ok(None) }
     }
     /// Triggered when the session is ending (agent shutdown or disconnect).
-    fn on_session_end(
-        &self,
+    fn on_session_end<'a>(
+        &'a self,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -99,6 +107,7 @@ pub trait Hook: Send + Sync {
     fn post_turn<'a>(
         &'a self,
         _response: &'a str,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -110,6 +119,7 @@ pub trait Hook: Send + Sync {
     fn on_compaction<'a>(
         &'a self,
         _step: &'a crate::types::Step,
+        _context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
@@ -123,45 +133,63 @@ pub trait DynHook: Send + Sync {
     fn declares(&self) -> crate::hook_dispatch::HookKinds;
 
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+    fn on_session_start<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
     /// Intercepts the start of a user turn before the LLM processes the prompt.
-    fn pre_turn(&self) -> BoxFuture<'_, Result<HookResult, anyhow::Error>>;
+    fn pre_turn<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>>;
 
     /// Intercepts a tool call immediately before it is executed by the runner.
     fn pre_tool_call<'a>(
         &'a self,
         tool_call: &'a ToolCall,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>>;
 
     /// Triggered after a tool successfully returns a result.
     fn post_tool_call<'a>(
         &'a self,
         result: &'a ToolResult,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
     /// Triggered when a tool execution fails; may replace the error text.
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<Option<String>, anyhow::Error>>;
 
     /// Intercepts a prompt to ask the user clarifying questions.
     fn on_interaction<'a>(
         &'a self,
         questions: &'a [AskQuestionEntry],
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>>;
 
     /// Triggered when the session is ending.
-    fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+    fn on_session_end<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
     /// Triggered after a turn completes.
-    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+    fn post_turn<'a>(
+        &'a self,
+        response: &'a str,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
     /// Triggered when the conversation history is compacted.
     fn on_compaction<'a>(
         &'a self,
         step: &'a crate::types::Step,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 }
 
@@ -170,55 +198,73 @@ impl<T: Hook + ?Sized> DynHook for T {
         self.declares()
     }
 
-    fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.on_session_start().await })
+    fn on_session_start<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_session_start(context).await })
     }
 
-    fn pre_turn(&self) -> BoxFuture<'_, Result<HookResult, anyhow::Error>> {
-        Box::pin(async move { self.pre_turn().await })
+    fn pre_turn<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>> {
+        Box::pin(async move { self.pre_turn(context).await })
     }
 
     fn pre_tool_call<'a>(
         &'a self,
         tool_call: &'a ToolCall,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>> {
-        Box::pin(async move { self.pre_tool_call(tool_call).await })
+        Box::pin(async move { self.pre_tool_call(tool_call, context).await })
     }
 
     fn post_tool_call<'a>(
         &'a self,
         result: &'a ToolResult,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.post_tool_call(result).await })
+        Box::pin(async move { self.post_tool_call(result, context).await })
     }
 
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<Option<String>, anyhow::Error>> {
-        Box::pin(async move { self.on_tool_error(error).await })
+        Box::pin(async move { self.on_tool_error(error, context).await })
     }
 
     fn on_interaction<'a>(
         &'a self,
         questions: &'a [AskQuestionEntry],
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>> {
-        Box::pin(async move { self.on_interaction(questions).await })
+        Box::pin(async move { self.on_interaction(questions, context).await })
     }
 
-    fn on_session_end(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.on_session_end().await })
+    fn on_session_end<'a>(
+        &'a self,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_session_end(context).await })
     }
 
-    fn post_turn<'a>(&'a self, response: &'a str) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.post_turn(response).await })
+    fn post_turn<'a>(
+        &'a self,
+        response: &'a str,
+        context: &'a HookContext,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.post_turn(response, context).await })
     }
 
     fn on_compaction<'a>(
         &'a self,
         step: &'a crate::types::Step,
+        context: &'a HookContext,
     ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(async move { self.on_compaction(step).await })
+        Box::pin(async move { self.on_compaction(step, context).await })
     }
 }
 
@@ -226,13 +272,19 @@ impl<T: Hook + ?Sized> DynHook for T {
 #[derive(Clone, Default)]
 pub struct HookRunner {
     hooks: Arc<tokio::sync::RwLock<Vec<Arc<dyn DynHook>>>>,
+    /// The session-scoped context every dispatch hands to its hooks.
+    ///
+    /// One per runner, so a hook that stores something in `on_session_start`
+    /// can read it back in `post_tool_call`. Turn- and operation-scoped
+    /// children hang off this via [`HookContext::child`].
+    context: Arc<HookContext>,
 }
 
 impl std::fmt::Debug for HookRunner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HookRunner")
             .field("hooks_count", &self.hooks.try_read().map_or(0, |h| h.len()))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -241,11 +293,21 @@ impl HookRunner {
     pub fn new() -> Self {
         Self {
             hooks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            context: Arc::new(HookContext::new()),
         }
     }
 
     pub async fn register(&self, hook: Arc<dyn DynHook>) {
         self.hooks.write().await.push(hook);
+    }
+
+    /// The session-scoped context handed to every hook.
+    ///
+    /// Exposed so a caller can seed it before starting, or read what hooks
+    /// recorded afterwards.
+    #[must_use]
+    pub fn context(&self) -> Arc<HookContext> {
+        self.context.clone()
     }
 
     /// The union of every registered hook's declared kinds.
@@ -265,7 +327,7 @@ impl HookRunner {
     pub async fn dispatch_session_start(&self) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.on_session_start().await?;
+            hook.on_session_start(&self.context).await?;
         }
         Ok(())
     }
@@ -273,7 +335,7 @@ impl HookRunner {
     pub async fn dispatch_pre_turn(&self) -> Result<HookResult, anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            let res = hook.pre_turn().await?;
+            let res = hook.pre_turn(&self.context).await?;
             if !res.allow {
                 return Ok(res);
             }
@@ -290,7 +352,7 @@ impl HookRunner {
     ) -> Result<HookResult, anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            let res = hook.pre_tool_call(tool_call).await?;
+            let res = hook.pre_tool_call(tool_call, &self.context).await?;
             if !res.allow {
                 return Ok(res);
             }
@@ -335,7 +397,7 @@ impl HookRunner {
     pub async fn dispatch_post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.post_tool_call(result).await?;
+            hook.post_tool_call(result, &self.context).await?;
         }
         Ok(())
     }
@@ -350,7 +412,7 @@ impl HookRunner {
     pub async fn dispatch_on_tool_error(&self, error: &anyhow::Error) -> Option<String> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            match hook.on_tool_error(error).await {
+            match hook.on_tool_error(error, &self.context).await {
                 Ok(Some(message)) => return Some(message),
                 Ok(None) => {}
                 Err(hook_err) => {
@@ -367,7 +429,7 @@ impl HookRunner {
     ) -> Result<Option<QuestionHookResult>, anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            if let Some(res) = hook.on_interaction(questions).await? {
+            if let Some(res) = hook.on_interaction(questions, &self.context).await? {
                 return Ok(Some(res));
             }
         }
@@ -378,7 +440,7 @@ impl HookRunner {
     pub async fn dispatch_session_end(&self) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.on_session_end().await?;
+            hook.on_session_end(&self.context).await?;
         }
         Ok(())
     }
@@ -387,7 +449,7 @@ impl HookRunner {
     pub async fn dispatch_post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.post_turn(response).await?;
+            hook.post_turn(response, &self.context).await?;
         }
         Ok(())
     }
@@ -399,7 +461,7 @@ impl HookRunner {
     ) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            hook.on_compaction(step).await?;
+            hook.on_compaction(step, &self.context).await?;
         }
         Ok(())
     }
@@ -421,7 +483,11 @@ mod tests {
     struct BrokenHook;
 
     impl Hook for BrokenHook {
-        async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+        async fn pre_tool_call(
+            &self,
+            _tool_call: &ToolCall,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             Err(anyhow::anyhow!("the policy store is unreachable"))
         }
     }
@@ -434,6 +500,51 @@ mod tests {
             canonical_path: None,
             server_name: None,
         }
+    }
+
+    /// The point of threading a context: what a hook writes in one lifecycle
+    /// event is readable in the next, without the hook holding its own state.
+    #[tokio::test]
+    async fn the_context_persists_across_dispatches() {
+        struct Remembering;
+
+        impl Hook for Remembering {
+            async fn on_session_start(
+                &self,
+                context: &crate::context::HookContext,
+            ) -> Result<(), anyhow::Error> {
+                context.set("greeted", true);
+                Ok(())
+            }
+            async fn pre_tool_call(
+                &self,
+                _tool_call: &ToolCall,
+                context: &crate::context::HookContext,
+            ) -> Result<HookResult, anyhow::Error> {
+                context.update::<u32, _>("calls", |c| Some(c.unwrap_or(0) + 1));
+                Ok(HookResult {
+                    allow: context.get::<bool>("greeted").unwrap_or(false),
+                    message: String::new(),
+                })
+            }
+        }
+
+        let runner = HookRunner::new();
+        runner.register(Arc::new(Remembering)).await;
+
+        // Before the session starts, the flag is unset and the gate refuses.
+        let (allow, _) = HookRunner::gate_tool_call(Some(&runner), &probe_call()).await;
+        assert!(!allow);
+
+        runner.dispatch_session_start().await.unwrap();
+        let (allow, _) = HookRunner::gate_tool_call(Some(&runner), &probe_call()).await;
+        assert!(
+            allow,
+            "the session-start write was not visible to pre_tool_call"
+        );
+
+        // And the counter accumulated across both calls.
+        assert_eq!(runner.context().get::<u32>("calls"), Some(2));
     }
 
     #[tokio::test]
@@ -459,7 +570,10 @@ mod tests {
     }
 
     impl Hook for TrackerHook {
-        async fn on_session_start(&self) -> Result<(), anyhow::Error> {
+        async fn on_session_start(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -467,7 +581,10 @@ mod tests {
             Ok(())
         }
 
-        async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        async fn pre_turn(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -485,7 +602,11 @@ mod tests {
             }
         }
 
-        async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+        async fn pre_tool_call(
+            &self,
+            _tool_call: &ToolCall,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -503,7 +624,11 @@ mod tests {
             }
         }
 
-        async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
+        async fn post_tool_call(
+            &self,
+            _result: &ToolResult,
+            _context: &crate::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -514,6 +639,7 @@ mod tests {
         async fn on_tool_error(
             &self,
             _error: &anyhow::Error,
+            _context: &crate::context::HookContext,
         ) -> Result<Option<String>, anyhow::Error> {
             self.calls
                 .lock()
@@ -529,6 +655,7 @@ mod tests {
         async fn on_interaction(
             &self,
             _questions: &[AskQuestionEntry],
+            _context: &crate::context::HookContext,
         ) -> Result<Option<QuestionHookResult>, anyhow::Error> {
             self.calls
                 .lock()
@@ -544,7 +671,10 @@ mod tests {
             }
         }
 
-        async fn on_session_end(&self) -> Result<(), anyhow::Error> {
+        async fn on_session_end(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -552,7 +682,11 @@ mod tests {
             Ok(())
         }
 
-        async fn post_turn(&self, _response: &str) -> Result<(), anyhow::Error> {
+        async fn post_turn(
+            &self,
+            _response: &str,
+            _context: &crate::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -560,7 +694,11 @@ mod tests {
             Ok(())
         }
 
-        async fn on_compaction(&self, _step: &crate::types::Step) -> Result<(), anyhow::Error> {
+        async fn on_compaction(
+            &self,
+            _step: &crate::types::Step,
+            _context: &crate::context::HookContext,
+        ) -> Result<(), anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
@@ -719,6 +857,7 @@ mod tests {
             async fn on_tool_error(
                 &self,
                 _error: &anyhow::Error,
+                _context: &crate::context::HookContext,
             ) -> Result<Option<String>, anyhow::Error> {
                 Err(anyhow::anyhow!("hook exploded"))
             }
@@ -728,6 +867,7 @@ mod tests {
             async fn on_tool_error(
                 &self,
                 _error: &anyhow::Error,
+                _context: &crate::context::HookContext,
             ) -> Result<Option<String>, anyhow::Error> {
                 Ok(Some("try a smaller page size".to_string()))
             }

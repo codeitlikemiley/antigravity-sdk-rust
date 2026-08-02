@@ -436,12 +436,12 @@ impl Tool for WeatherTool {
 struct AuditHook;
 
 impl Hook for AuditHook {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+    async fn pre_tool_call(&self, tool_call: &ToolCall, ctx: &HookContext) -> Result<HookResult, anyhow::Error> {
         println!("[AUDIT] Tool called: {} with args: {}", tool_call.name, tool_call.args);
         Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_turn(&self, response: &str) -> Result<(), anyhow::Error> {
+    async fn post_turn(&self, response: &str, ctx: &HookContext) -> Result<(), anyhow::Error> {
         println!("[AUDIT] Turn complete, {} chars", response.len());
         Ok(())
     }

@@ -159,7 +159,10 @@ mod tests {
     struct DenyingHook(&'static str);
 
     impl Hook for DenyingHook {
-        async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        async fn pre_turn(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             Ok(HookResult {
                 allow: false,
                 message: self.0.to_string(),
@@ -170,7 +173,10 @@ mod tests {
     struct BrokenHook;
 
     impl Hook for BrokenHook {
-        async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        async fn pre_turn(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             Err(anyhow::anyhow!("quota lookup failed"))
         }
     }
@@ -329,18 +335,26 @@ mod router_tests {
     struct Denier;
 
     impl Hook for Denier {
-        async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+        async fn pre_tool_call(
+            &self,
+            _tool_call: &ToolCall,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             Ok(HookResult {
                 allow: false,
                 message: "not on my watch".to_string(),
             })
         }
-        async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        async fn pre_turn(
+            &self,
+            _context: &crate::context::HookContext,
+        ) -> Result<HookResult, anyhow::Error> {
             Err(anyhow::anyhow!("cannot decide"))
         }
         async fn on_tool_error(
             &self,
             _error: &anyhow::Error,
+            _context: &crate::context::HookContext,
         ) -> Result<Option<String>, anyhow::Error> {
             Ok(Some("try fewer rows".to_string()))
         }

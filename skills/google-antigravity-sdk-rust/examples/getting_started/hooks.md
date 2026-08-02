@@ -12,7 +12,7 @@ use antigravity_sdk_rust::types::{AskQuestionEntry, HookResult, QuestionHookResu
 
 pub trait Hook: Send + Sync {
     /// Triggered when the agent establishes a connection and starts a session.
-    fn on_session_start(&self) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+    fn on_session_start<'a>(&'a self, _context: &'a HookContext) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
 
@@ -49,6 +49,7 @@ pub trait Hook: Send + Sync {
     fn on_tool_error<'a>(
         &'a self,
         _error: &'a anyhow::Error,
+        context: &'a HookContext,
     ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
         async { Ok(None) }
     }
@@ -80,7 +81,7 @@ use std::sync::Arc;
 struct LoggerHook;
 
 impl Hook for LoggerHook {
-    fn on_session_start(&self) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+    fn on_session_start<'a>(&'a self, _context: &'a HookContext) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async {
             println!("[Hook] Session has successfully started!");
             Ok(())

@@ -103,12 +103,12 @@ The SDK has been fully refactored to leverage native async traits (stable since 
 - **Zero-overhead Blanket Implementations**: The companion traits are automatically implemented via blanket implementations for any type implementing the base trait:
   ```rust
   pub trait DynHook: Send + Sync {
-      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+      fn on_session_start<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>>;
       // ...
   }
 
   impl<T: Hook + ?Sized> DynHook for T {
-      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+      fn on_session_start<'a>(&'a self, context: &'a HookContext) -> BoxFuture<'a, Result<(), anyhow::Error>> {
           Box::pin(async move { self.on_session_start().await })
       }
       // ...
