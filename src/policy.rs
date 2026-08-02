@@ -517,6 +517,19 @@ pub fn ask_user_mcp(
 }
 
 /// Internal helper for generating MCP policies.
+/// Builds the policy group for an MCP server target.
+///
+/// To attach a predicate or a custom name — upstream's `when` and `name`
+/// arguments (`policy.py:173,187`) — map over the returned group with
+/// [`Policy::when`] / [`Policy::with_name`], which avoids widening three public
+/// signatures for options most callers do not pass:
+///
+/// ```ignore
+/// let policies: Vec<Policy> = policy::deny_mcp(&server, None)
+///     .into_iter()
+///     .map(|p| p.with_name("no_writes").when(|tc| tc.name.ends_with("_write")))
+///     .collect();
+/// ```
 fn mcp_policies(
     server_name: &str,
     decision: Decision,
@@ -549,9 +562,16 @@ fn mcp_policies(
     }
 }
 
+/// The lowercased decision name used in generated policy names.
+///
+/// Mirrors upstream's `decision.value.lower()` (`policy.py:173,187`), whose
+/// `Decision.APPROVE` yields `approve` — this crate previously emitted `allow`,
+/// so a generated name did not match the one upstream's tests pin. The name
+/// reaches tracing and `Debug` output, not user-facing denial messages, which
+/// take the policy's `message` instead.
 const fn decision_label(d: Decision) -> &'static str {
     match d {
-        Decision::Approve => "allow",
+        Decision::Approve => "approve",
         Decision::Deny => "deny",
         Decision::AskUser => "ask_user",
     }
