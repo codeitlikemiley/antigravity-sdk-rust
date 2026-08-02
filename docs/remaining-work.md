@@ -21,22 +21,9 @@ Historical note — 16 items landed at the time this status line was first
 written: WI-1…WI-8 and WI-14 (merged in
 #8); WP-1, the core of WP-2, the core of WP-6 and C5 (open in #9).
 
-> **The handshake now works.** `connect()` reads
-> `initialize_conversation_response`, sends `session_continuation_mode`, and
-> shuts down in order so the harness persists its trajectory. What remains
-> before a real 0.1.9 turn completes is **WP-5** — the idle state machine still
-> tracks `parent_idle` + `active_subagent_ids` from 0.1.1, and
-> `TrajectoryStateUpdate.error` and `STATE_CANCELLED` are unhandled.
-
-**Landed in #9 beyond WP-1/WP-2:** the handshake read with replayed history
-exposed as `LocalConnection::initial_history()`; `SessionContinuationMode` on
-the config and builder (field 19) with upstream's RESUME validation; ordered
-shutdown (close stdin → wait 3min → escalate); `StepTracker` dedup cleared on
-leaving WAITING_FOR_USER.
-
-**WP-6 remainder:** seed `Conversation` from `initial_history`; `env`
-passthrough; `DebugConfig`; `save_dir` temp default; prompt control-character
-sanitization; 127.0.0.1 connect fallback.
+Everything the paragraphs above once listed as pending has landed. The tables
+below are the record; where a row's delivery differs from what was planned, the
+row says so.
 
 ---
 
@@ -46,7 +33,7 @@ sanitization; 127.0.0.1 connect fallback.
 |---|---|---|---|
 | ~~WP-6~~ | **Done** on both transports; `DebugConfig` is not in the 0.1.9 proto and is out of scope | S | — |
 | ~~WP-2 tail~~ | **Done** — `session_end` handshake, `callHookRequest` exercised end to end, wasm mock uses real frames | S | — |
-| **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
+| ~~WP-5~~ | Turn lifecycle and idle state machine — **done**, delivered as Phase A: main-trajectory tracking (A1), the sentinel protocol (A2), `STATE_CANCELLED` and cancel support (A3), `TrajectoryStateUpdate.error` (A4) | L | WP-1, WP-2 |
 | ~~WP-4~~ | Model configuration public API — **done** as C1–C3 | L | WP-1 |
 | ~~WP-7~~ | Tool runner correctness — **done** as D2 (`error_message`), D4 (coercion), D5 (`ToolContext`) and B5 (structured results) | M | WP-1 |
 | ~~WP-9~~ | Capability surface — **done** as C4, C5, C6, C7 | L | WP-1, WP-4 |
@@ -131,20 +118,23 @@ Before starting anything in §2 or §3, read **fix plan §8** — seven items ed
 `Agent::start`, six edit `process_tool_calls`, and the ordering rules there are
 load-bearing.
 
-Recommended order:
+The order this was executed in, kept because the dependencies still explain the
+shape of the diff:
 
-1. ~~WP-6 core~~ — done. **WP-5** is now the blocker for a turn completing.
-2. **WP-6 remainder** — small, and it finishes session resumption.
-3. **WP-2 tail** — cheap, and makes WP-8 exercisable.
-4. **§2 (0.1.15)** as a shippable non-breaking release.
-5. **WP-4 + WP-7 + WP-9** — the capability surface.
-6. **WP-8** — largest, and it contains the `Hook` trait break.
-7. **§3 (0.2.0)** batched with WP-10, so downstream breaks once.
-8. **WP-11** — the drift-detection CI job is what stops this happening again.
+1. WP-6 core, then Phase A — the connection had to complete a turn first.
+2. WP-2 tail, which is what made the hook channel exercisable.
+3. §2, the non-breaking fixes.
+4. WP-4 + WP-7 + WP-9 — the capability surface.
+5. WP-8, the largest, carrying the `Hook` trait break.
+6. §3 batched with WP-10, so downstream breaks once.
+7. WP-11's drift-detection job.
 
-One standing caveat: CI still compiles neither the wasm target nor the docs, so
-every `src/wasm.rs` mirror in this backlog is unverified. The cheap subset of
-WP-11 is worth landing early for that reason alone.
+The standing caveat here was that CI compiled neither the wasm target nor the
+docs, leaving every `src/wasm.rs` mirror unverified. That was resolved early by
+pulling B7 forward: CI now builds the wasm target, the doctests and the
+directory examples, and it caught a genuine wasm-only break on its first run.
+Two further wasm-side drifts were found afterwards, which is the argument for
+having done it first rather than last.
 
 ---
 
