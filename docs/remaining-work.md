@@ -160,7 +160,7 @@ plans.
 
 | # | Batch | Items | Size | Done when |
 |---|---|---|---|---|
-| A1 | Main-trajectory tracking | Replace `parent_idle` + `active_subagent_ids` with `main_trajectory_id` set from the first non-empty `trajectory_id`; return early for non-main trajectories; clear it in `send()` | S | A subagent going idle no longer ends the caller's turn; the `OnceLock` learning heuristic is gone |
+| ~~A1~~ | ~~Main-trajectory tracking~~ — **done** | Replace `parent_idle` + `active_subagent_ids` with `main_trajectory_id` set from the first non-empty `trajectory_id`; return early for non-main trajectories; clear it in `send()` | S | A subagent going idle no longer ends the caller's turn; the `OnceLock` learning heuristic is gone |
 | A2 | Sentinel restructure **+ C2** | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
 | A3 | Cancellation | `STATE_CANCELLED` arm, `Connection::cancel()`, `AntigravityError::Cancelled` | S | A cancelled turn is distinguishable from a completed one |
 | A4 | Turn-level errors | `TrajectoryStateUpdate.error` (field 4); `ActionError.error_message` fallback; harness-crash stderr tail | S | A turn that fails server-side surfaces an error instead of ending silently |

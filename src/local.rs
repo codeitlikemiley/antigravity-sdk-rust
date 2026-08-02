@@ -65,9 +65,11 @@ pub struct LocalConnection {
     ws_tx: UnboundedSender<String>,
     tool_runner: Option<ToolRunner>,
     hook_runner: Option<HookRunner>,
-    parent_idle: Arc<Mutex<bool>>,
-    active_subagent_ids: Arc<Mutex<HashSet<String>>>,
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
+    /// The trajectory whose idle transitions end a turn. Learned from the first
+    /// `StepUpdate` of each turn and cleared by `send()`, mirroring upstream's
+    /// `reset_for_turn()` (`event_processor.py:379-386`).
+    main_trajectory_id: Arc<Mutex<Option<String>>>,
     /// Steps the harness replayed in its handshake reply, for a resumed
     /// conversation. Seeding `Conversation` with these is the remaining
     /// half of WP-6.
@@ -91,8 +93,6 @@ impl std::fmt::Debug for LocalConnection {
             .field("is_idle", &self.is_idle)
             .field("tool_runner", &self.tool_runner)
             .field("hook_runner", &self.hook_runner)
-            .field("parent_idle", &self.parent_idle)
-            .field("active_subagent_ids", &self.active_subagent_ids)
             .field("step_trackers", &self.step_trackers)
             .finish_non_exhaustive()
     }
@@ -181,12 +181,11 @@ impl Connection for LocalConnection {
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
         self.is_idle.store(false, Ordering::SeqCst);
         {
-            let mut p_idle = self.parent_idle.lock().await;
-            *p_idle = false;
-        }
-        {
-            let mut active = self.active_subagent_ids.lock().await;
-            active.clear();
+            // A new turn may run on a new trajectory; relearn it rather than
+            // judging this turn against the last one's (upstream
+            // reset_for_turn(), event_processor.py:379-386).
+            let mut main_id = self.main_trajectory_id.lock().await;
+            *main_id = None;
         }
         {
             let mut guard = self.step_rx.lock().await;
@@ -809,14 +808,10 @@ impl LocalConnectionStrategy {
         // poll as end-of-stream — the stream would terminate before any step
         // arrives. Blocked on C3, which is part of WP-5.
         let is_idle = Arc::new(AtomicBool::new(false));
-        let parent_idle = Arc::new(Mutex::new(false));
-        let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
-        let conn_parent_idle = parent_idle.clone();
-        let conn_active_subagents = active_subagent_ids.clone();
         let conn_step_trackers = step_trackers.clone();
 
         let tool_runner = self.tool_runner.clone();
@@ -857,17 +852,23 @@ impl LocalConnectionStrategy {
                                             let step_idx = step_update.step_index.unwrap_or(0);
                                             let key = (traj_id.clone(), step_idx);
 
-                                            // Learn the cascade_id from the first StepUpdate
-                                            // where cascade_id == trajectory_id (Python parity)
-                                            {
-                                                let cascade_id_val = step_update.cascade_id.clone().unwrap_or_default();
-                                                if !cascade_id_val.is_empty() && cascade_id_val == traj_id {
-                                                    let _ = conn_learned_id.set(cascade_id_val.clone());
-                                                    let mut cid = conn_cascade_id_for_ws.lock().await;
-                                                    if cid.is_none() {
-                                                        tracing::debug!("Learned cascade_id from StepUpdate: {}", cascade_id_val);
-                                                        *cid = Some(cascade_id_val);
-                                                    }
+                                            // The main trajectory is whichever one reports first,
+                                            // unconditionally — upstream event_processor.py:478-480.
+                                            // The previous rule also required cascade_id ==
+                                            // trajectory_id, so on a resumed session, or when a
+                                            // subagent reported first, nothing was ever learned and
+                                            // every trajectory then counted as the main one.
+                                            if !traj_id.is_empty() {
+                                                let mut main_id =
+                                                    conn_cascade_id_for_ws.lock().await;
+                                                let unset = main_id.is_none();
+                                                if unset {
+                                                    *main_id = Some(traj_id.clone());
+                                                }
+                                                drop(main_id);
+                                                if unset {
+                                                    tracing::debug!("main trajectory: {traj_id}");
+                                                    let _ = conn_learned_id.set(traj_id.clone());
                                                 }
                                             }
 
@@ -1147,29 +1148,23 @@ impl LocalConnectionStrategy {
                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
-                                            let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
-                                            let learned_cascade = conn_cascade_id_for_ws.lock().await;
-                                            let is_subagent = learned_cascade.as_ref().is_some_and(|cid| !sub_id.is_empty() && sub_id != *cid);
-                                            tracing::debug!("TrajectoryStateUpdate: trajectory_id={:?}, state={:?}, is_subagent={}, learned_cascade_id={:?}", sub_id, tsu.state, is_subagent, *learned_cascade);
-                                            drop(learned_cascade);
+                                            let traj_id = tsu.trajectory_id.clone().unwrap_or_default();
+                                            let main_id = conn_cascade_id_for_ws.lock().await;
+                                            // Only the main trajectory drives idle. Upstream returns
+                                            // early for subagent trajectories (event_processor.py:539-542);
+                                            // the previous parent_idle + active_subagent_ids
+                                            // bookkeeping is the 0.1.1 shape, deleted upstream in 0.1.6.
+                                            let is_main = main_id
+                                                .as_ref()
+                                                .is_none_or(|id| traj_id.is_empty() || traj_id == *id);
+                                            tracing::debug!("TrajectoryStateUpdate: trajectory_id={traj_id:?}, state={:?}, is_main={is_main}", tsu.state);
+                                            drop(main_id);
 
-                                            let mut active_subs = conn_active_subagents.lock().await;
-                                            let mut p_idle = conn_parent_idle.lock().await;
-
-                                            if tsu.state == Some(1) { // STATE_RUNNING
-                                                if is_subagent {
-                                                    active_subs.insert(sub_id);
-                                                }
-                                            } else if tsu.state == Some(2) { // STATE_IDLE
-                                                if is_subagent {
-                                                    active_subs.remove(&sub_id);
-                                                } else {
-                                                    *p_idle = true;
-                                                }
+                                            if !is_main {
+                                                continue;
                                             }
 
-                                            tracing::debug!("TrajectoryStateUpdate: p_idle={}, active_subs_empty={}", *p_idle, active_subs.is_empty());
-                                            if *p_idle && active_subs.is_empty() && !conn_is_idle.swap(true, Ordering::SeqCst) {
+                                            if tsu.state == Some(2) && !conn_is_idle.swap(true, Ordering::SeqCst) { // STATE_FULLY_IDLE
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
                                                 let sentinel = Step {
                                                     id: "IDLE_SENTINEL".to_string(),
@@ -1400,9 +1395,8 @@ impl LocalConnectionStrategy {
             ws_tx,
             tool_runner: self.tool_runner.clone(),
             hook_runner: self.hook_runner.clone(),
-            parent_idle,
-            active_subagent_ids,
             step_trackers,
+            main_trajectory_id: conn_cascade_id,
             initial_history,
         })
     }
