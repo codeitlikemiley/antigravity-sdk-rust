@@ -287,3 +287,14 @@ The name is used for:
 | N/A | `McpServerConfig::Http { ... }` (Rust-only) |
 | `LocalAgentConfig(mcp_servers=[...])` | `Agent::builder().mcp_servers(vec![...])` |
 | `McpBridge` (runtime client) | Handled by localharness (not in SDK) |
+
+## Servers reach the harness
+
+MCP servers configured on the builder are emitted on `HarnessConfig.mcp_servers`
+(field 14). Until now the builder accepted them and both transports stored
+them, and nothing ever put them on the wire — `mcp_server(...)` was a no-op and
+the model never saw a single MCP tool.
+
+A stdio server carries its `command`, `args`, `env` and `timeout_seconds`. SSE
+and HTTP both map to the proto's single HTTP transport; the harness negotiates
+the streaming style itself.

@@ -990,6 +990,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let mut policies = deny_mcp(&server, None); // "math/*" deny
         policies.push(allow_all());
@@ -1018,6 +1020,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let mut policies = deny_mcp(&server, None); // "calc/*" deny (level 3)
         policies.extend(allow_mcp(&server, Some(&["add"]))); // "calc/add" allow (level 2)
@@ -1062,6 +1066,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
         let s2 = McpServerConfig::Stdio {
             name: "math_advanced".to_string(),
@@ -1069,6 +1075,8 @@ mod tests {
             args: vec![],
             enabled_tools: None,
             disabled_tools: None,
+            env: std::collections::HashMap::new(),
+            timeout_seconds: None,
         };
 
         let mut policies = deny_mcp(&s2, Some(&["calc"])); // "math_advanced/calc" deny

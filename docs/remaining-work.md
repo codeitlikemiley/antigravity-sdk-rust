@@ -183,7 +183,7 @@ break on its first run.
 | ~~C1~~ | Model types — **done**. `ThinkingLevel` uses per-variant renames: `rename_all = "lowercase"` would have emitted `extrahigh` | `ModelTarget` / `ModelEndpoint` / `GeminiModelOptions`, `ThinkingLevel::ExtraHigh` | M |
 | ~~C2~~ | Model resolution — **done**. Explicit → shorthand → defaults, deduped by model type and never by name; an explicit target without an endpoint is an error | M |
 | ~~C3~~ | Model environment — **done**. `GOOGLE_GENAI_USE_VERTEXAI`/`_USE_ENTERPRISE` select Vertex, `GOOGLE_CLOUD_PROJECT`/`_LOCATION` hydrate it, and an env-only key stays off the wire | S |
-| C4 | MCP on the wire | `McpServerConfig` proto + `mcp_servers` field 14; stdio `env`, `timeout_seconds` | M |
+| ~~C4~~ | MCP on the wire — **done**. `mcp_server(...)` was a no-op: the builder accepted servers, both strategies stored them, and nothing emitted them, so the model never saw an MCP tool | M |
 | C5 | Retry + truncation | `RetryConfig`, `ToolOutputTruncation` | S |
 | C6 | New built-ins | `search_web`, `read_url_content` configs and their step actions | M |
 | C7 | Subagents | `SubagentConfig` / `SubagentCapabilities` → `custom_subagents` field 17, with upstream's three validations | L |

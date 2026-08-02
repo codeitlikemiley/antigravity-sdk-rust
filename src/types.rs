@@ -507,6 +507,13 @@ pub enum McpServerConfig {
         command: String,
         /// execution arguments.
         args: Vec<String>,
+        /// Extra environment for the server process, on top of what it
+        /// inherits.
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// How long the harness waits for the server before giving up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<i32>,
         /// Explicit allowlist of tools to enable. Mutually exclusive with `disabled_tools`.
         #[serde(skip_serializing_if = "Option::is_none")]
         enabled_tools: Option<Vec<String>>,
@@ -521,6 +528,9 @@ pub enum McpServerConfig {
         name: String,
         /// HTTP URL endpoint.
         url: String,
+        /// How long the harness waits for the server before giving up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<i32>,
         /// Additional HTTP headers.
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,

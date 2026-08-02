@@ -352,6 +352,7 @@ impl Agent<Unstarted> {
                     tool_runner: Some(self.tool_runner.clone()),
                     hook_runner: Some(self.hook_runner.clone()),
                     conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
+                    mcp_servers: self.config.mcp_servers.clone(),
                 };
 
                 let conn = strategy.connect().await?;

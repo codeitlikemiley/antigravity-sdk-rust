@@ -788,7 +788,7 @@ impl LocalConnectionStrategy {
             retry_config: None,
             enabled_hooks: Vec::new(),
             custom_subagents: Vec::new(),
-            mcp_servers: Vec::new(),
+            mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
             tool_output_truncation: None,
             models: crate::harness_config::build_models_proto(
                 &self.gemini_config,

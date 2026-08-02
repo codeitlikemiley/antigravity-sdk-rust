@@ -398,3 +398,153 @@ mod model_tests {
         assert!(err.to_string().contains("no endpoint"), "{err}");
     }
 }
+
+/// Maps the crate's MCP server configs onto `HarnessConfig.mcp_servers`
+/// (field 14).
+///
+/// The builder accepted MCP servers, both strategies stored them, and nothing
+/// ever put them on the wire — so `mcp_server(...)` was a no-op and the model
+/// never saw a single MCP tool (audit CT-011).
+///
+/// SSE and HTTP both map to `McpHttpTransport`: the 0.1.9 proto has one HTTP
+/// transport, and the harness negotiates the streaming style itself.
+#[must_use]
+pub fn build_mcp_servers_proto(
+    servers: &[crate::types::McpServerConfig],
+) -> Vec<crate::proto::localharness::McpServerConfig> {
+    use crate::proto::localharness::{
+        McpHttpTransport, McpServerConfig as ProtoMcp, McpStdioTransport, mcp_server_config,
+    };
+    use crate::types::McpServerConfig;
+
+    servers
+        .iter()
+        .map(|server| match server {
+            McpServerConfig::Stdio {
+                name,
+                command,
+                args,
+                enabled_tools,
+                disabled_tools,
+                env,
+                timeout_seconds,
+            } => ProtoMcp {
+                name: Some(name.clone()),
+                enabled_tools: enabled_tools.clone().unwrap_or_default(),
+                disabled_tools: disabled_tools.clone().unwrap_or_default(),
+                auth_provider_type: None,
+                timeout_seconds: *timeout_seconds,
+                transport: Some(mcp_server_config::Transport::Stdio(McpStdioTransport {
+                    command: Some(command.clone()),
+                    args: args.clone(),
+                    env: env.clone(),
+                })),
+            },
+            McpServerConfig::Sse {
+                name,
+                url,
+                headers,
+                enabled_tools,
+                disabled_tools,
+                timeout_seconds,
+            } => ProtoMcp {
+                name: Some(name.clone()),
+                enabled_tools: enabled_tools.clone().unwrap_or_default(),
+                disabled_tools: disabled_tools.clone().unwrap_or_default(),
+                auth_provider_type: None,
+                timeout_seconds: *timeout_seconds,
+                transport: Some(mcp_server_config::Transport::Http(McpHttpTransport {
+                    url: Some(url.clone()),
+                    headers: headers.clone().unwrap_or_default(),
+                })),
+            },
+            McpServerConfig::Http {
+                name,
+                url,
+                headers,
+                enabled_tools,
+                disabled_tools,
+                timeout,
+                ..
+            } => ProtoMcp {
+                name: Some(name.clone()),
+                enabled_tools: enabled_tools.clone().unwrap_or_default(),
+                disabled_tools: disabled_tools.clone().unwrap_or_default(),
+                auth_provider_type: None,
+                // The proto's granularity is whole seconds; the crate's HTTP
+                // variant has carried a float since before this field existed.
+                #[allow(clippy::cast_possible_truncation)]
+                timeout_seconds: Some(*timeout as i32),
+                transport: Some(mcp_server_config::Transport::Http(McpHttpTransport {
+                    url: Some(url.clone()),
+                    headers: headers.clone().unwrap_or_default(),
+                })),
+            },
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::build_mcp_servers_proto;
+    use crate::proto::localharness::mcp_server_config::Transport;
+    use crate::types::McpServerConfig;
+
+    #[test]
+    fn a_stdio_server_carries_its_command_env_and_timeout() {
+        let servers = vec![McpServerConfig::Stdio {
+            name: "github".to_string(),
+            command: "mcp-github".to_string(),
+            args: vec!["--stdio".to_string()],
+            enabled_tools: Some(vec!["create_issue".to_string()]),
+            disabled_tools: None,
+            env: std::iter::once(("TOKEN".to_string(), "abc".to_string())).collect(),
+            timeout_seconds: Some(30),
+        }];
+        let proto = build_mcp_servers_proto(&servers);
+        assert_eq!(proto.len(), 1);
+        assert_eq!(proto[0].name.as_deref(), Some("github"));
+        assert_eq!(proto[0].enabled_tools, vec!["create_issue".to_string()]);
+        assert_eq!(proto[0].timeout_seconds, Some(30));
+        match proto[0].transport.as_ref().unwrap() {
+            Transport::Stdio(t) => {
+                assert_eq!(t.command.as_deref(), Some("mcp-github"));
+                assert_eq!(t.env.get("TOKEN").map(String::as_str), Some("abc"));
+            }
+            other @ Transport::Http(_) => panic!("unexpected transport {other:?}"),
+        }
+    }
+
+    /// The 0.1.9 proto has one HTTP transport; the harness negotiates the
+    /// streaming style, so SSE and HTTP map to the same frame.
+    #[test]
+    fn sse_and_http_both_map_to_the_http_transport() {
+        for server in [
+            McpServerConfig::Sse {
+                name: "s".to_string(),
+                url: "https://example.test/sse".to_string(),
+                headers: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                timeout_seconds: None,
+            },
+            McpServerConfig::Http {
+                name: "h".to_string(),
+                url: "https://example.test/mcp".to_string(),
+                headers: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                timeout: 30.0,
+                sse_read_timeout: 300.0,
+                terminate_on_close: true,
+            },
+        ] {
+            let proto = build_mcp_servers_proto(&[server]);
+            assert!(matches!(
+                proto[0].transport.as_ref().unwrap(),
+                Transport::Http(_)
+            ));
+        }
+    }
+}

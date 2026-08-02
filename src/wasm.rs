@@ -86,6 +86,8 @@ pub struct WasmConnectionStrategy {
     pub tool_runner: Option<ToolRunner>,
     pub hook_runner: Option<HookRunner>,
     pub conversation_id: String,
+    /// MCP server configurations, emitted on `HarnessConfig.mcp_servers`.
+    pub mcp_servers: Vec<crate::types::McpServerConfig>,
 }
 
 impl WasmConnectionStrategy {
@@ -297,7 +299,7 @@ impl WasmConnectionStrategy {
             retry_config: None,
             enabled_hooks: Vec::new(),
             custom_subagents: Vec::new(),
-            mcp_servers: Vec::new(),
+            mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
             tool_output_truncation: None,
             models: crate::harness_config::build_models_proto(
                 &self.gemini_config,
@@ -1737,6 +1739,7 @@ mod tests {
             tool_runner: None,
             hook_runner: None,
             conversation_id: "test_traj".to_string(),
+            mcp_servers: Vec::new(),
         };
 
         // Connect
