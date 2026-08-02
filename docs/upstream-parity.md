@@ -7,6 +7,8 @@
 
 This document replaces the first-pass parity note. Several of that note's claims are false and are corrected below (see [Corrections to the first-pass audit](#corrections-to-the-first-pass-audit)).
 
+**Companion document:** `docs/fix-plan-current-defects.md` plans the subset of these findings that is wrong *right now*, against the 0.1.1 harness this crate pins — implementable without touching the wire format. It also rejects five findings from this audit with evidence (H8, H7-narrow, and the wording of S7, N6 and S15); those rejections are folded back in here.
+
 ---
 
 ## 1. What changed upstream, and what it costs us
@@ -250,7 +252,7 @@ A final agent walked the 0.1.9 tree looking for what the eight subsystem audits 
 | N3 | tools | `connections/local/types.py`'s structured per-tool result models (`RunCommandResult`, `ListDirectoryResult`, `SearchWebResult`, `ReadUrlContentResult` …) have no Rust counterpart — `post_tool_call` hooks get raw display text | `src/local.rs:1413-1428` | M |
 | N4 | strategies | LiteRT (on-device) and LocalOpenAI (Ollama / LM Studio, via `GemmaEndpoint`) strategies absent; both are top-level upstream exports since 0.1.6 | absent | XL |
 | N5 | types | `ThinkingLevel::ExtraHigh` (0.1.8) missing. Watch the serde trap: the blanket `rename_all = "lowercase"` would emit `extrahigh`, not `extra_high` | `src/types.rs:17-29` | XS |
-| N6 | types | `CapabilitiesConfig` does not reject `enabled_tools` and `disabled_tools` being set together; Rust silently lets `enabled_tools` win, upstream raises | `src/types.rs:224-242`; `src/local.rs:610-623` | XS |
+| N6 | types | `CapabilitiesConfig` does not reject `enabled_tools` and `disabled_tools` being set together — **only on the direct-strategy path**. `Agent::start` already validates this (`src/agent.rs:199-203`, pinned by `tests/integration_tests.rs:86-104`); the completeness pass missed that and its "Rust silently lets `enabled_tools` win" is false for the `Agent` path | `src/local.rs:610-623`; `src/wasm.rs:245-260` | XS |
 | N7 | types | `SystemInstructionSection.title` has no default (upstream: `"user_system_instructions"`) and there is no `&str` → appended-section shorthand | `src/types.rs:125-131`; `src/agent.rs:487-489` | XS |
 | N8 | agent | `AgentBuilder::policies` does not flatten nested groups; upstream's `_validate_policies` does, which is why every group builder can be composed inline | `src/agent.rs:~505` vs `connection.py:138-159` | XS |
 
@@ -529,7 +531,9 @@ Upstream reads more than we do, and reads them in different places: `GEMINI_API_
 
 #### `read_only()` — what is and is not broken
 
-`BuiltinTools::read_only()` (`src/types.rs:213-221`) returns four tools; upstream's has included `FINISH` since 0.1.1 and gained `READ_URL_CONTENT` in 0.1.6. The audit's stronger reading — that `AgentBuilder::read_only()` therefore denies the `finish` tool and the agent cannot terminate — does **not** hold on the current code: `finish` never becomes a `ToolCall` (`src/local.rs` maps it to `StepType::Finish` at `:789` and never routes it through `extract_builtin_tool_call`), so the `deny_all()` prefix built at `src/agent.rs:592-604` never sees it. What *is* real today is narrower: `has_write_tools` (`src/agent.rs:239-240`) is permanently true, because `Finish` is always in `active_tools` and never in `read_only()`. The list must still be corrected before harness-side pre-tool gating lands, at which point `finish` *would* be gated.
+`BuiltinTools::read_only()` (`src/types.rs:213-221`) returns four tools; upstream's has included `FINISH` since 0.1.1 and gained `READ_URL_CONTENT` in 0.1.6. The stronger reading — that `AgentBuilder::read_only()` therefore denies the `finish` tool and the agent cannot terminate — does **not** hold on the current code: `finish` never becomes a `ToolCall` (`src/local.rs` maps it to `StepType::Finish` at `:789` and never routes it through `extract_builtin_tool_call`), so the `deny_all()` prefix built at `src/agent.rs:592-604` never sees it. What is real today is narrower: `has_write_tools` (`src/agent.rs:239-240`) is permanently true, because `Finish` is always in `active_tools` and never in `read_only()`.
+
+But the reason `finish` is not a `ToolCall` is itself a port regression: upstream's `_BUILTIN_TOOL_PROTO_FIELDS` has mapped `FINISH: "finish"` since 0.1.1 (`local_connection.py:105-116`), so upstream *does* policy-evaluate it and we simply dropped the arm. Fix the extractor and the `read_only()` list together — fixing only the extractor would make every read-only agent unable to terminate. Both are planned in `docs/fix-plan-current-defects.md` (WI-5, WI-40).
 
 #### Findings
 
