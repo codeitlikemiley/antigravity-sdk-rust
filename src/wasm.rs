@@ -51,7 +51,13 @@ impl StepTracker {
         Self::default()
     }
 
-    pub const fn update_state(&mut self, state: i32) {
+    pub fn update_state(&mut self, state: i32) {
+        // Leaving WAITING_FOR_USER ends the request round. Without this the
+        // dedup set persists, so a re-asked question is never answered a second
+        // time and the harness waits forever. STATE_WAITING_FOR_USER = 3.
+        if self.state == 3 && state != 3 {
+            self.handled_requests.clear();
+        }
         self.state = state;
     }
 

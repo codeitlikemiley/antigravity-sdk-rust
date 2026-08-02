@@ -8,6 +8,10 @@
 /// never sends one, so this bounds that case rather than failing it.
 const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
 
+/// How long to wait for the harness to exit after stdin closes, before
+/// escalating. Upstream uses the same three minutes (`local_connection.py:53`).
+const PROCESS_WAIT_TIMEOUT_SECONDS: u64 = 3 * 60;
+
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
@@ -329,8 +333,30 @@ impl Connection for LocalConnection {
     }
 
     async fn disconnect(&self) -> Result<(), anyhow::Error> {
+        // Ordered shutdown, mirroring upstream local_connection.py:407-455.
+        // A bare kill() runs no Go defers, so cleanupAllAgents never runs and
+        // the trajectory is never written to disk -- upstream's own tests spell
+        // this out (local_connection_test.py:3110-3130).
+        //
+        // Closing stdin is the actual signal: the harness monitors it for EOF.
+        {
+            let mut stdin = self.child_stdin.lock().await;
+            drop(stdin.take());
+        }
+
         let mut proc = self.process.lock().await;
-        let _ = proc.kill().await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(PROCESS_WAIT_TIMEOUT_SECONDS),
+            proc.wait(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            // Exited badly, or took too long: escalate rather than hang.
+            _ => {
+                let _ = proc.kill().await;
+            }
+        }
         drop(proc);
         Ok(())
     }
@@ -1387,7 +1413,13 @@ pub struct StepTracker {
 
 impl StepTracker {
     /// Updates the tracked step status state.
-    pub const fn update_state(&mut self, state: i32) {
+    pub fn update_state(&mut self, state: i32) {
+        // Leaving WAITING_FOR_USER ends the request round. Without this the
+        // dedup set persists, so a re-asked question is never answered a second
+        // time and the harness waits forever. STATE_WAITING_FOR_USER = 3.
+        if self.state == 3 && state != 3 {
+            self.handled_requests.clear();
+        }
         self.state = state;
     }
 
