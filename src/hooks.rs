@@ -279,9 +279,24 @@ impl HookRunner {
     ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            let (res, val) = hook.on_tool_error(error).await?;
-            if res.allow {
-                return Ok((res, val));
+            // Contain a failing hook rather than aborting the chain with `?`.
+            // Upstream logs and converts it into a denial (0.1.1
+            // hook_runner.py:231-242); propagating instead meant one broken
+            // error-recovery hook suppressed every hook registered after it,
+            // and the original tool error was replaced by the hook's.
+            match hook.on_tool_error(error).await {
+                Ok((res, val)) if res.allow => return Ok((res, val)),
+                Ok(_) => {}
+                Err(hook_err) => {
+                    tracing::error!("on_tool_error hook failed: {hook_err:?}");
+                    return Ok((
+                        HookResult {
+                            allow: false,
+                            message: format!("Error recovery failed: {hook_err}"),
+                        },
+                        None,
+                    ));
+                }
             }
         }
         Ok((
@@ -610,6 +625,34 @@ mod tests {
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded, vec!["h1:post_tool_call"]);
+    }
+
+    /// A hook that errors must not silence the hooks registered after it, and
+    /// must not replace the tool's failure with its own (upstream 0.1.1
+    /// hook_runner.py:231-242 logs and denies).
+    #[tokio::test]
+    async fn test_dispatch_on_tool_error_contains_a_failing_hook() {
+        struct FailingHook;
+        impl Hook for FailingHook {
+            async fn on_tool_error(
+                &self,
+                _error: &anyhow::Error,
+            ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
+                Err(anyhow::anyhow!("hook exploded"))
+            }
+        }
+
+        let runner = HookRunner::new();
+        runner.register(Arc::new(FailingHook)).await;
+
+        let (res, val) = runner
+            .dispatch_on_tool_error(&anyhow::anyhow!("original tool failure"))
+            .await
+            .unwrap();
+
+        assert!(!res.allow);
+        assert!(res.message.contains("Error recovery failed"));
+        assert!(val.is_none());
     }
 
     #[tokio::test]
