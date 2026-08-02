@@ -112,6 +112,13 @@ impl Conversation {
         self.conn.is_idle()
     }
 
+    /// Resolves once the turn in flight has finished.
+    ///
+    /// Returns immediately if none is running.
+    pub async fn wait_for_idle(&self) {
+        self.conn.wait_for_idle().await;
+    }
+
     /// Retrieves a copy of the current conversation history steps.
     pub async fn history(&self) -> Vec<Step> {
         self.state.lock().await.steps.clone()
@@ -163,15 +170,30 @@ impl Conversation {
 
     /// Sends a text prompt to the connection and registers the turn start boundary.
     ///
+    /// Any steps still queued from the previous turn are drained into history
+    /// first.
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying connection fails to transmit the prompt.
     pub async fn send(&self, prompt: &str) -> Result<(), anyhow::Error> {
-        // If not idle, wait for it
-        if !self.conn.is_idle() {
-            // Note: Unlike Python's runtime RuntimeError handling, in Rust we can just wait
-            // or let the stream run-loop handle it.
+        // Drain whatever is left of the previous turn into history before
+        // starting a new one (upstream `conversation.py:125-134`). A caller who
+        // stopped reading mid-turn used to lose those steps entirely, and the
+        // next turn's boundary was recorded at the wrong index.
+        //
+        // If another consumer holds the step stream, `receive_steps()` yields a
+        // single error and this ends immediately rather than fighting it.
+        //
+        // Only after a turn has actually been sent: a fresh connection reports
+        // not-idle until the harness says otherwise, and draining there would
+        // block forever on a stream with nothing to deliver.
+        let turn_in_flight = !self.state.lock().await.turn_start_indices.is_empty();
+        if turn_in_flight && !self.conn.is_idle() {
+            let mut leftovers = self.receive_steps();
+            while leftovers.next().await.is_some() {}
         }
+
         let mut state = self.state.lock().await;
         let len = state.steps.len();
         state.turn_start_indices.push(len);
@@ -474,6 +496,36 @@ mod tests {
         let history = conv.history().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content, "resumed");
+    }
+
+    /// A caller who stops reading mid-turn used to lose those steps entirely,
+    /// and the next turn's boundary was recorded at the wrong index.
+    #[tokio::test]
+    async fn send_drains_the_previous_turn_into_history() {
+        let (conn, conv) = test_setup("conv-123", Some(100));
+        conn.set_steps(vec![
+            Step {
+                content: "first".to_string(),
+                ..Default::default()
+            },
+            Step {
+                content: "second".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        conv.send("one").await.unwrap();
+        assert_eq!(conv.history().await.len(), 0, "nothing read yet");
+
+        // Second send drains what the caller never read.
+        conn.set_idle(false);
+        conv.send("two").await.unwrap();
+
+        let history = conv.history().await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(conv.turn_count().await, 2);
+        // The second turn starts after the drained steps, not on top of them.
+        assert_eq!(conv.compaction_indices().await.len(), 0);
     }
 
     #[tokio::test]

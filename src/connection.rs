@@ -20,6 +20,13 @@ pub trait Connection: Send + Sync {
     /// Returns whether the connection is currently idle.
     fn is_idle(&self) -> bool;
 
+    /// Resolves once the connection is idle.
+    ///
+    /// Returns immediately if it already is. Callers that need to know a turn
+    /// has finished previously had to poll `is_idle()` in a sleep loop, which
+    /// is both slower to notice and easy to write as a busy wait.
+    fn wait_for_idle(&self) -> impl std::future::Future<Output = ()> + Send;
+
     /// Subscribes to the stream of step updates from the connection.
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>>;
 
@@ -165,6 +172,17 @@ impl Connection for AnyConnection {
             Self::Wasm(c) => c.is_idle(),
             #[cfg(test)]
             Self::Mock(c) => c.is_idle(),
+        }
+    }
+
+    async fn wait_for_idle(&self) {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.wait_for_idle().await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.wait_for_idle().await,
+            #[cfg(test)]
+            Self::Mock(c) => c.wait_for_idle().await,
         }
     }
 
@@ -316,6 +334,20 @@ impl MockConnection {
             sent_prompts: std::sync::Mutex::new(Vec::new()),
         }
     }
+
+    /// Queues the steps `receive_steps()` will yield.
+    pub fn set_steps(&self, steps: Vec<Step>) {
+        *self
+            .steps_to_yield
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = steps;
+    }
+
+    /// Sets what `is_idle()` reports.
+    pub fn set_idle(&self, idle: bool) {
+        self.is_idle
+            .store(idle, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +358,12 @@ impl Connection for MockConnection {
 
     fn is_idle(&self) -> bool {
         self.is_idle.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn wait_for_idle(&self) {
+        while !self.is_idle() {
+            tokio::task::yield_now().await;
+        }
     }
 
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {

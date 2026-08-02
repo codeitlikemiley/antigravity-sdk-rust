@@ -409,3 +409,17 @@ pub struct Step {
 > **Key difference:** In the Rust SDK, all state-querying methods are `async` because the
 > internal state is protected by a `tokio::sync::Mutex`. In Python, these are synchronous
 > properties protected by the GIL.
+
+## `send` drains the previous turn
+
+Steps still queued from the previous turn are drained into history before a new
+prompt goes out. A caller who stopped reading mid-turn used to lose those steps
+entirely, and the next turn's boundary was recorded at the wrong index.
+
+The drain only runs once a turn has actually been sent — a freshly connected
+session reports not-idle until the harness says otherwise, and draining there
+would block on a stream with nothing to deliver.
+
+`wait_for_idle()` resolves when the turn in flight finishes, returning
+immediately if none is running. It is watch-backed, so it notices the moment
+the harness reports idle rather than on the next tick of a poll loop.

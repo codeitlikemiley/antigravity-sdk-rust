@@ -360,6 +360,8 @@ impl WasmConnectionStrategy {
         // hides this; ours does not promise that yet. Flipping it needs the
         // connect-time race closed first (see C2 in docs/remaining-work.md).
         let is_idle = Arc::new(AtomicBool::new(false));
+        let (idle_tx, _idle_rx) = tokio::sync::watch::channel(false);
+        let conn_idle_tx = idle_tx.clone();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
         // Last model text seen on each subagent trajectory, so the
@@ -848,6 +850,7 @@ impl WasmConnectionStrategy {
 
                                             if tsu.state == Some(2) || tsu.state == Some(3) { // STATE_FULLY_IDLE | STATE_CANCELLED
                                                 conn_is_idle.store(true, Ordering::SeqCst);
+                                                let _ = conn_idle_tx.send(true);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
                                                 let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
                                             }
@@ -1065,6 +1068,7 @@ impl WasmConnectionStrategy {
                     "harness connection closed before the turn finished"
                 )));
                 conn_is_idle_for_close.store(true, Ordering::SeqCst);
+                let _ = conn_idle_tx.send(true);
                 let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
             }
         });
@@ -1086,6 +1090,7 @@ impl WasmConnectionStrategy {
             main_trajectory_id: conn_cascade_id,
             cancel_requested,
             steps_consumed: Arc::new(AtomicBool::new(false)),
+            idle_tx,
             subagent_responses,
         })
     }
@@ -1113,6 +1118,8 @@ pub struct WasmConnection {
     cancel_requested: Arc<AtomicBool>,
     /// Whether a `receive_steps()` stream is currently live. See that method.
     steps_consumed: Arc<AtomicBool>,
+    /// Mirrors `is_idle` for [`Connection::wait_for_idle`].
+    idle_tx: tokio::sync::watch::Sender<bool>,
     /// Last model text per subagent trajectory; see the capture site in the
     /// reader loop. Cleared per turn.
     subagent_responses: Arc<Mutex<HashMap<String, String>>>,
@@ -1129,6 +1136,17 @@ impl Connection for WasmConnection {
 
     fn is_idle(&self) -> bool {
         self.is_idle.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_idle(&self) {
+        if self.is_idle() {
+            return;
+        }
+        // Watch rather than poll: the reader sets this the moment the harness
+        // reports idle, so a caller learns immediately instead of on the next
+        // tick of a sleep loop.
+        let mut rx = self.idle_tx.subscribe();
+        let _ = rx.wait_for(|idle| *idle).await;
     }
 
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
@@ -1194,6 +1212,7 @@ impl Connection for WasmConnection {
         crate::hook_dispatch::gate_turn(self.hook_runner.as_ref()).await?;
 
         self.is_idle.store(false, Ordering::SeqCst);
+        let _ = self.idle_tx.send(false);
         // A halt applies to the turn it interrupted. Leaving the flag set would
         // make the *next* turn report itself cancelled the moment it went idle.
         self.cancel_requested.store(false, Ordering::SeqCst);

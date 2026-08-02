@@ -53,7 +53,7 @@ Twelve items, none blocking each other except where noted.
 | ID | What | Files | Size |
 |---|---|---|---|
 | C2 | A freshly connected connection reports `is_idle == true`. **Blocked on the connect-time race**, not on C3 — the loop restructure removed the first-poll hazard, but a caller polling `receive_steps()` before the reader sees `STATE_RUNNING` still gets an empty stream. Upstream's API is send()-then-receive; ours does not promise that. Tried twice, reverted twice; `NOTE` at both sites | `local.rs`, `wasm.rs` | S |
-| A5 | `Conversation::send` drains the previous turn into history | `conversation.rs`, `connection.rs` | M |
+| ~~A5~~ | **Done** — `send` drains the previous turn into history first, but only once a turn has actually been sent: a fresh connection reports not-idle, and draining there would block on a stream with nothing to deliver | `conversation.rs`, `connection.rs` | M |
 | ~~hook-dispatch~~ | **Done** — `src/hook_dispatch.rs` | `hook_dispatch.rs` (new) | XS |
 | ~~H1a~~ | **Done** — `gate_turn` runs before any state is touched, so a denied turn leaves the connection untouched; a hook that errors denies, matching S2 | `hook_dispatch.rs`, both transports | S |
 | ~~H12~~ | **Done** — a non-main trajectory going idle dispatches `post_tool_call` for `START_SUBAGENT`, carrying the subagent's last model text (or its trajectory id). `examples/subagents.rs` now fires | `local.rs`, `wasm.rs` | S |
@@ -105,7 +105,7 @@ blocked on the migration.
 
 | ID | What | Size |
 |---|---|---|
-| wait-for-idle | `Connection` has no `wait_for_idle`; A5 ships an unsound poll loop without it | S |
+| ~~wait-for-idle~~ | **Done** — `Connection::wait_for_idle` is watch-backed, not a poll loop; also on `Conversation` | S |
 | ~~harness-crash-diagnostics~~ | **Done** — landed with A4 | S |
 | predicate-args-fidelity | **`diff_block` done.** Remaining: `SEARCH_DIR`/`RUN_COMMAND` args still carry non-proto result keys (`output`, `combined_output`, `exit_code`) that a predicate cannot rely on before execution | XS |
 | ~~single-consumer-receive-steps~~ | **Done** — the connection hands out one live stream at a time and a second subscriber gets an error rather than half the steps. The claim is released when the stream drops, so the per-turn call still works | XS |
@@ -166,7 +166,7 @@ That is the milestone worth cutting a release around.
 | B1 | Policy ergonomics | S15, N8 | XS |
 | B2 | Hook plumbing module — **module + `gate_turn` done**; H1c and H9 remain | `hook-dispatch`, H1c, H9 | S |
 | ~~B3~~ | Turn hooks — **done** | H1a (`pre_turn` with deny semantics), H12 | S |
-| B4 | Conversation drain | A5 + `wait-for-idle` (the latter is a prerequisite, not optional) | M |
+| ~~B4~~ | Conversation drain — **done** | A5 + `wait-for-idle` | M |
 | B5 | Structured tool results | N3 | M |
 | ~~B6~~ | Small correctness — **done** | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
 | B7 | WP-2 tail (**CI subset done**; `session_end` reply + `callHookRequest` branch remain) | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
