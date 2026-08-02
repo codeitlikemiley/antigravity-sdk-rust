@@ -440,7 +440,7 @@ const fn default_true() -> bool {
 }
 
 /// Describes a model's request to execute a registered tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Unique call ID generated for correlation.
     pub id: String,
@@ -451,10 +451,17 @@ pub struct ToolCall {
     /// Canonical file system path (if the tool targets a file/directory).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_path: Option<String>,
+    /// The MCP server this tool belongs to, if any.
+    ///
+    /// `None` for a built-in or a client-side Rust tool. A policy predicate
+    /// could not tell `github/create_issue` from a local `create_issue`
+    /// without it — the name alone is ambiguous across servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
 }
 
 /// The response outcome of executing a client-side tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     /// Name of the executed tool.
     pub name: String,
@@ -467,6 +474,16 @@ pub struct ToolResult {
     /// Error message string if tool execution failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The MCP server that ran the tool, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    /// The failure in structured form, when there was one.
+    ///
+    /// `error` is the message shown to the model; this carries what a
+    /// `post_tool_call` hook needs to route or count failures without parsing
+    /// prose. Not serialized to the wire — the harness only takes the message.
+    #[serde(skip)]
+    pub exception: Option<crate::error::ToolExecutionError>,
 }
 
 /// Consumption stats for API usage tracking.
@@ -1107,6 +1124,7 @@ mod tests {
             name: "read_file".to_string(),
             args: json!({"path": "/tmp/foo"}),
             canonical_path: None,
+            server_name: None,
         };
         assert_eq!(tc.name, "read_file");
         assert_eq!(tc.args["path"], "/tmp/foo");
@@ -1131,6 +1149,8 @@ mod tests {
             id: Some("call_1".to_string()),
             result: Some(json!(42)),
             error: None,
+            server_name: None,
+            exception: None,
         };
         assert_eq!(tr.name, "sum_tool");
         assert_eq!(tr.result.unwrap(), 42);
@@ -1145,6 +1165,8 @@ mod tests {
             id: None,
             result: None,
             error: Some("kaboom".to_string()),
+            server_name: None,
+            exception: None,
         };
         assert_eq!(tr.name, "bad_tool");
         assert!(tr.result.is_none());
@@ -1159,6 +1181,8 @@ mod tests {
             id: None,
             result: None,
             error: None,
+            server_name: None,
+            exception: None,
         };
         tr.result = Some(json!("updated"));
         assert_eq!(tr.result.unwrap(), "updated");

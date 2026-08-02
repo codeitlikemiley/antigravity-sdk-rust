@@ -76,6 +76,7 @@ pub mod path_safety;
 pub mod policy;
 pub mod step_extract;
 pub mod tool_context;
+pub mod tool_wire;
 pub mod tools;
 pub mod trigger_helpers;
 pub mod triggers;

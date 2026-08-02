@@ -624,6 +624,8 @@ impl WasmConnectionStrategy {
                                                             id: Some(tc.id.clone()),
                                                             result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(Value::String)),
                                                             error: None,
+                                                            server_name: None,
+                                                            exception: None,
                                                         };
                                                         let runner_clone = runner.clone();
                                                         crate::spawn_task(async move {
@@ -791,6 +793,8 @@ impl WasmConnectionStrategy {
                                                             id: None,
                                                             result: Some(Value::String(response)),
                                                             error: None,
+                                                            server_name: None,
+                                                            exception: None,
                                                         };
                                                         let runner = runner.clone();
                                                         crate::spawn_task(async move {
@@ -887,18 +891,13 @@ impl WasmConnectionStrategy {
                                             let learned_id_clone = conn_learned_id.clone();
                                             let counter = client_tool_step_counter.clone();
                                             crate::spawn_task(async move {
-                                                // An absent or empty arguments_json is an empty argument object, not
-                                                // null: upstream does `json.loads(arguments_json or "{}")`.
-                                                // A tool reading `args["x"]` got a type error instead of a
-                                                // missing key.
-                                                let raw_args = tool_call.arguments_json.clone().unwrap_or_default();
-                                                let raw_args = if raw_args.trim().is_empty() { "{}".to_string() } else { raw_args };
-                                                let args: Value = serde_json::from_str(&raw_args).unwrap_or(Value::Null);
+                                                let args: Value = crate::tool_wire::parse_arguments(tool_call.arguments_json.as_deref());
                                                 let tc = ToolCall {
                                                     id: tool_call.id.clone().unwrap_or_default(),
                                                     name: tool_call.name.clone().unwrap_or_default(),
                                                     args: args.clone(),
                                                     canonical_path: None,
+                                                    server_name: None,
                                                 };
                                                 tracing::debug!("ToolCall event received: id={}, name={}", tc.id, tc.name);
 
@@ -966,6 +965,8 @@ impl WasmConnectionStrategy {
                                                     name: tc.name.clone(),
                                                     result: None,
                                                     error: None,
+                                                    server_name: None,
+                                                    exception: None,
                                                 };
 
                                                 if let Some(ref runner) = tool_runner {
@@ -1010,31 +1011,14 @@ impl WasmConnectionStrategy {
                                                         name: tc.name.clone(),
                                                         args: result_args,
                                                         canonical_path: None,
+                                                        server_name: None,
                                                     }],
                                                     trajectory_id: traj_id,
                                                     ..Default::default()
                                                 };
                                                 let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(done_step)));
 
-                                                // Wrap non-object values under "result"
-                                                let resp_json = if let Some(ref val) = result.result {
-                                                    if val.is_object() {
-                                                        serde_json::to_string(val).unwrap_or_default()
-                                                    } else {
-                                                        serde_json::to_string(&serde_json::json!({ "result": val })).unwrap_or_default()
-                                                    }
-                                                } else if let Some(ref err) = result.error {
-                                                    serde_json::to_string(&serde_json::json!({ "error": err })).unwrap_or_default()
-                                                } else {
-                                                    "{}".to_string()
-                                                };
-
-                                                let resp = ToolResponse {
-                                                    id: tool_call.id.clone(),
-                                                    response_json: Some(resp_json),
-                                                    error_message: None,
-                                                    supplemental_media: Vec::new(),
-                                                };
+                                                let resp = crate::tool_wire::tool_response(tool_call.id.clone(), &result);
                                                 let input_event = InputEvent {
                                                     event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
                                                 };
@@ -1394,6 +1378,8 @@ fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
         name: tool_call.name,
         result,
         error,
+        server_name: None,
+        exception: None,
     })
 }
 

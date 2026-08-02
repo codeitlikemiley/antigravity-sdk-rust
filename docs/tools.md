@@ -268,3 +268,15 @@ When the model asks for several tools at once, they execute concurrently and
 the batch takes as long as its slowest member rather than the sum. Results come
 back in call order regardless of which finished first. Tools that share mutable
 state need their own synchronisation.
+
+## Failures on the wire
+
+A tool that fails sends the harness both a payload and `error_message`. The
+field was never set before, so a failed call was recorded as a success whose
+output happened to mention an error.
+
+`ToolResult` carries the failure twice on purpose: `error` is the message the
+model is shown, and `exception` is the same failure as a
+`ToolExecutionError { message, tool_name, server_name }` for hooks that route
+or count failures. `server_name` is `None` for built-ins and client-side Rust
+tools, and set for MCP tools — the name alone is ambiguous across servers.

@@ -633,6 +633,7 @@ mod tests {
             name: name.to_string(),
             args,
             canonical_path,
+            server_name: None,
         }
     }
 

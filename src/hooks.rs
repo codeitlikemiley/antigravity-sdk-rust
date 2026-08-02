@@ -401,6 +401,7 @@ mod tests {
             name: "RUN_COMMAND".to_string(),
             args: serde_json::json!({}),
             canonical_path: None,
+            server_name: None,
         }
     }
 
@@ -643,6 +644,7 @@ mod tests {
             name: "tool_1".to_string(),
             args: serde_json::Value::Null,
             canonical_path: None,
+            server_name: None,
         };
         let res = runner.dispatch_pre_tool_call(&tool_call).await.unwrap();
         assert!(!res.allow);
@@ -668,6 +670,8 @@ mod tests {
             id: Some("call_1".to_string()),
             result: Some(serde_json::Value::Null),
             error: None,
+            server_name: None,
+            exception: None,
         };
         runner.dispatch_post_tool_call(&res).await.unwrap();
 

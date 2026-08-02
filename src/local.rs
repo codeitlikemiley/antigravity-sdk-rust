@@ -23,10 +23,10 @@ use crate::proto::localharness::{
     InitializeConversationEvent, InputConfig, InputEvent, ListDirToolConfig, MultipleChoiceAnswer,
     OutputConfig, OutputEvent, RunCommandToolConfig, SubagentsConfig,
     SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
-    ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
-    ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
-    appended_system_instructions::Section, custom_system_instructions::Part,
-    user_questions_response::QuestionsResponse, workspace::WorkspaceType,
+    UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse, ViewFileToolConfig,
+    Workspace as ProtoWorkspace, WriteToFileToolConfig, appended_system_instructions::Section,
+    custom_system_instructions::Part, user_questions_response::QuestionsResponse,
+    workspace::WorkspaceType,
 };
 use crate::tools::ToolRunner;
 use crate::types::{
@@ -268,27 +268,7 @@ impl Connection for LocalConnection {
     }
 
     async fn send_tool_response(&self, id: &str, result: ToolResult) -> Result<(), anyhow::Error> {
-        let resp_json = if let Some(ref val) = result.result {
-            // The Go harness expects responseJson to always be a JSON object.
-            // If the tool returned a non-object value (string, number, array, etc.),
-            // wrap it under a "result" key to match the Python SDK's behavior.
-            if val.is_object() {
-                serde_json::to_string(val)?
-            } else {
-                serde_json::to_string(&serde_json::json!({ "result": val }))?
-            }
-        } else if let Some(ref err) = result.error {
-            serde_json::to_string(&serde_json::json!({ "error": err }))?
-        } else {
-            "{}".to_string()
-        };
-
-        let resp = ToolResponse {
-            id: Some(id.to_string()),
-            response_json: Some(resp_json),
-            error_message: None,
-            supplemental_media: Vec::new(),
-        };
+        let resp = crate::tool_wire::tool_response(Some(id.to_string()), &result);
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
         };
@@ -1188,6 +1168,8 @@ impl LocalConnectionStrategy {
                                                             id: Some(tc.id.clone()),
                                                             result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(Value::String)),
                                                             error: None,
+                                                            server_name: None,
+                                                            exception: None,
                                                         };
                                                         let runner_clone = runner.clone();
                                                         tokio::spawn(async move {
@@ -1358,6 +1340,8 @@ impl LocalConnectionStrategy {
                                                             id: None,
                                                             result: Some(Value::String(response)),
                                                             error: None,
+                                                            server_name: None,
+                                                            exception: None,
                                                         };
                                                         let runner = runner.clone();
                                                         tokio::spawn(async move {
@@ -1449,18 +1433,13 @@ impl LocalConnectionStrategy {
                                             let learned_id_clone = conn_learned_id.clone();
                                             let counter = client_tool_step_counter.clone();
                                             tokio::spawn(async move {
-                                                // An absent or empty arguments_json is an empty argument object, not
-                                                // null: upstream does `json.loads(arguments_json or "{}")`.
-                                                // A tool reading `args["x"]` got a type error instead of a
-                                                // missing key.
-                                                let raw_args = tool_call.arguments_json.clone().unwrap_or_default();
-                                                let raw_args = if raw_args.trim().is_empty() { "{}".to_string() } else { raw_args };
-                                                let args: Value = serde_json::from_str(&raw_args).unwrap_or(Value::Null);
+                                                let args: Value = crate::tool_wire::parse_arguments(tool_call.arguments_json.as_deref());
                                                 let tc = ToolCall {
                                                     id: tool_call.id.clone().unwrap_or_default(),
                                                     name: tool_call.name.clone().unwrap_or_default(),
                                                     args: args.clone(),
                                                     canonical_path: None,
+                                                    server_name: None,
                                                 };
                                                 tracing::debug!("ToolCall event received: id={}, name={}", tc.id, tc.name);
 
@@ -1508,12 +1487,14 @@ impl LocalConnectionStrategy {
                                                     };
                                                     let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(denied_step)));
 
-                                                    let resp = ToolResponse {
-                                                        id: tool_call.id.clone(),
-                                                        response_json: Some("{\"error\": \"Execution denied by hook policy\"}".to_string()),
-                                                        error_message: None,
-                                                        supplemental_media: Vec::new(),
-                                                    };
+                                                    let resp = crate::tool_wire::denied_response(
+                                                        tool_call.id.clone(),
+                                                        if deny_reason.is_empty() {
+                                                            "Execution denied by hook policy"
+                                                        } else {
+                                                            &deny_reason
+                                                        },
+                                                    );
                                                     let input_event = InputEvent {
                                                         event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
                                                     };
@@ -1528,6 +1509,8 @@ impl LocalConnectionStrategy {
                                                     name: tc.name.clone(),
                                                     result: None,
                                                     error: None,
+                                                    server_name: None,
+                                                    exception: None,
                                                 };
 
                                                 if let Some(ref runner) = tool_runner {
@@ -1572,32 +1555,14 @@ impl LocalConnectionStrategy {
                                                         name: tc.name.clone(),
                                                         args: result_args,
                                                         canonical_path: None,
+                                                        server_name: None,
                                                     }],
                                                     trajectory_id: traj_id,
                                                     ..Default::default()
                                                 };
                                                 let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(done_step)));
 
-                                                // The Go harness expects responseJson to always be a JSON object.
-                                                // Wrap non-object values (string, number, array, etc.) under "result".
-                                                let resp_json = if let Some(ref val) = result.result {
-                                                    if val.is_object() {
-                                                        serde_json::to_string(val).unwrap_or_default()
-                                                    } else {
-                                                        serde_json::to_string(&serde_json::json!({ "result": val })).unwrap_or_default()
-                                                    }
-                                                } else if let Some(ref err) = result.error {
-                                                    serde_json::to_string(&serde_json::json!({ "error": err })).unwrap_or_default()
-                                                } else {
-                                                    "{}".to_string()
-                                                };
-
-                                                let resp = ToolResponse {
-                                                    id: tool_call.id.clone(),
-                                                    response_json: Some(resp_json),
-                                                    error_message: None,
-                                                    supplemental_media: Vec::new(),
-                                                };
+                                                let resp = crate::tool_wire::tool_response(tool_call.id.clone(), &result);
                                                 let input_event = InputEvent {
                                                     event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
                                                 };
@@ -1720,6 +1685,8 @@ fn extract_tool_result(step_update: &crate::proto::localharness::StepUpdate) -> 
         name: tool_call.name,
         result,
         error,
+        server_name: None,
+        exception: None,
     })
 }
 

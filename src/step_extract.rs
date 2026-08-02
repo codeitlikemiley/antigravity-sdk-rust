@@ -147,6 +147,7 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
         name: name.to_string(),
         args,
         canonical_path,
+        server_name: None,
     })
 }
 

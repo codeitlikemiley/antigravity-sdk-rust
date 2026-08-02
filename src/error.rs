@@ -42,3 +42,19 @@ pub enum AntigravityError {
         errors: Vec<ValidationDetail>,
     },
 }
+
+/// A tool failure, in structured form.
+///
+/// Carried on [`ToolResult::exception`](crate::types::ToolResult::exception) so
+/// a hook can route or count failures by tool and server without parsing the
+/// message text.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("`{tool_name}` failed: {message}")]
+pub struct ToolExecutionError {
+    /// What went wrong.
+    pub message: String,
+    /// The tool that failed.
+    pub tool_name: String,
+    /// The MCP server it belongs to, if any.
+    pub server_name: Option<String>,
+}

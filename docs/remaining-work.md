@@ -80,11 +80,11 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 
 | ID | What | Size |
 |---|---|---|
-| T6 | `ToolCall.server_name`; `ToolResult.{server_name, exception}` | S |
-| H11 | `ToolExecutionError{message, tool_name, server_name, source}` | XS |
-| tool-wire | New ungated module both transports delegate to | S |
+| ~~T6~~ | **Done** — a policy predicate can now tell `github/create_issue` from a local one, and a hook can route failures without parsing prose | S |
+| ~~H11~~ | **Done** — `error::ToolExecutionError`, carried on `ToolResult::exception` | XS |
+| ~~tool-wire~~ | **Done** — `src/tool_wire.rs`; the six drifted `ToolResponse` sites became one | S |
 | ~~T5~~ | **Done** — absent or empty `arguments_json` is an empty object, not null | XS |
-| W8 | Route all six `ToolResponse` constructions through one function | S |
+| ~~W8~~ | **Done** — and `error_message` is finally set, so a failed tool no longer reaches the harness looking like a success | S |
 | ~~docs-on-tool-error~~ | **Done** — `docs/hooks.md`, both skill references and the skill's hooks example | S |
 | ~~H1b~~ | **Done** — dispatched at the terminal user-facing model step | S |
 | ~~H1d+H16~~ | **Done** — dispatched on the compaction step, which is what the hook receives | XS |
@@ -196,7 +196,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | # | Batch | Items | Size |
 |---|---|---|---|
 | ~~D1~~ | Fail-closed gating — **done** | S2 | S |
-| D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
+| ~~D2~~ | Tool result shape — **done** | T6, H11, `tool-wire`, T5, W8 | M |
 | ~~D3~~ | `on_tool_error` contract — **done** | H4 + the documents that teach the old behaviour | M |
 | D4 | Tool runner — **T7+T8, T10, `finish-extractor` done**; T4 (schema coercion) remains | T7+T8, T4, T10, `finish-extractor` | M |
 | D5 | `ToolContext` — **T1+T9 and state atomicity done**; X19's example remains (unit tests cover the behaviour) | T1+T9, `tool-context-state-atomicity`, X19 | M |

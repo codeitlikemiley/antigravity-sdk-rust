@@ -962,6 +962,7 @@ mod tests {
             name: "VIEW_FILE".to_string(),
             args: serde_json::json!({}),
             canonical_path: Some("/app-data/state.json".to_string()),
+            server_name: None,
         };
         // `when` is "is outside the workspace", so false means allowed.
         assert!(!scoped(&inside_app_data));

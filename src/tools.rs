@@ -211,6 +211,8 @@ impl ToolRunner {
                         name: call.name.clone(),
                         result: None,
                         error: Some(format!("Tool {} not found", call.name)),
+                        server_name: None,
+                        exception: None,
                     };
                 };
                 let outcome = match (tool.needs_context(), context.as_ref()) {
@@ -226,15 +228,26 @@ impl ToolRunner {
                 match outcome {
                     Ok(val) => crate::types::ToolResult {
                         id: Some(call.id),
+                        server_name: call.server_name,
                         name: call.name,
                         result: Some(val),
                         error: None,
+                        exception: None,
                     },
                     Err(e) => crate::types::ToolResult {
                         id: Some(call.id),
+                        // The message the model sees, plus the same failure in
+                        // structured form so a hook can route or count it
+                        // without parsing prose.
+                        error: Some(e.to_string()),
+                        exception: Some(crate::error::ToolExecutionError {
+                            message: e.to_string(),
+                            tool_name: call.name.clone(),
+                            server_name: call.server_name.clone(),
+                        }),
+                        server_name: call.server_name,
                         name: call.name,
                         result: None,
-                        error: Some(e.to_string()),
                     },
                 }
             }
@@ -326,6 +339,7 @@ mod tests {
                 name: (*name).to_string(),
                 args: serde_json::json!({"n": i}),
                 canonical_path: None,
+                server_name: None,
             })
             .collect();
 
@@ -377,6 +391,7 @@ mod tests {
             name: "whoami".to_string(),
             args: Value::Null,
             canonical_path: None,
+            server_name: None,
         }
     }
 
@@ -436,6 +451,7 @@ mod tests {
                 name: "nope".to_string(),
                 args: Value::Null,
                 canonical_path: None,
+                server_name: None,
             }])
             .await;
         assert_eq!(results.len(), 1);

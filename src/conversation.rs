@@ -640,6 +640,7 @@ mod tests {
             name: "tool_1".to_string(),
             args: serde_json::Value::Null,
             canonical_path: None,
+            server_name: None,
         };
         let step = Step {
             id: "1".to_string(),
@@ -672,6 +673,7 @@ mod tests {
             name: "tool_1".to_string(),
             args: serde_json::Value::Null,
             canonical_path: None,
+            server_name: None,
         };
         let step = Step {
             id: "1".to_string(),
