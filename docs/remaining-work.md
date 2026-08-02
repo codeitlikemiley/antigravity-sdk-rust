@@ -92,7 +92,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | ~~T7+T8~~ | **Done** — duplicate names error from `Agent::start()`; the registry is a `Vec`, so order is registration order | S |
 | ~~T4~~ | **Done** — `src/coerce.rs`; only unambiguous conversions, so a real type error still reads as one | M |
 | ~~T10~~ | **Done** — the batch joins, and the registry lock is released before any tool body runs | S |
-| X19 | Exercise context-aware tools in an example and tests | S |
+| ~~X19~~ | **Done** — `examples/custom_tools.rs` has a session-state tool; unit tests cover the injection and the dead-session case | S |
 | ~~A11~~ | **Done** — `every(interval, callback)` plus `every_notification` for the fixed-message case; both reject a zero interval | S |
 | ~~finish-extractor~~ | **Done** — `FINISH` classifies as a tool call, so the one call that ends a turn is finally visible to policies and hooks | XS |
 
@@ -188,7 +188,7 @@ break on its first run.
 | C6 | New built-ins | `search_web`, `read_url_content` configs and their step actions | M |
 | C7 | Subagents | `SubagentConfig` / `SubagentCapabilities` → `custom_subagents` field 17, with upstream's three validations | L |
 
-### Phase D — the breaking release (0.2.0)
+### Phase D — the breaking release (0.2.0) — **complete**
 
 Batch **all** of Phase D into a single release; the audit's §6 decision 1 and the
 maintainer's §8.3 decisions both assume one break, not several.
@@ -199,7 +199,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~D2~~ | Tool result shape — **done** | T6, H11, `tool-wire`, T5, W8 | M |
 | ~~D3~~ | `on_tool_error` contract — **done** | H4 + the documents that teach the old behaviour | M |
 | ~~D4~~ | Tool runner — **done** | T7+T8, T4, T10, `finish-extractor` | M |
-| D5 | `ToolContext` — **T1+T9 and state atomicity done**; X19's example remains (unit tests cover the behaviour) | T1+T9, `tool-context-state-atomicity`, X19 | M |
+| ~~D5~~ | `ToolContext` — **done** | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | ~~D6~~ | Triggers — **done** | A10, A1, A11 | M |
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
 | ~~D8~~ | Remaining hook signatures — **done** | H1b, H1d+H16 | S |
