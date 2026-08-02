@@ -606,3 +606,13 @@ let mut agent = Agent::builder().allow_all().build();
 agent.register_hook(Arc::new(MyHook) as Arc<dyn DynHook>);
 // agent.start().await?;
 ```
+
+## A hook that errors denies the call
+
+`pre_tool_call` returning `Err` is not "no objection" — the call is **denied**
+and the model is told the gate could not decide. A gate that cannot reach its
+policy store, or whose predicate panicked, must not fall open.
+
+This is a behaviour change: a hook that used to error and let tools through now
+blocks them. If a hook has a failure mode you want to tolerate, handle it inside
+the hook and return `allow: true` explicitly.

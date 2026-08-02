@@ -265,6 +265,37 @@ impl HookRunner {
         })
     }
 
+    /// Decides whether a tool call may run, failing **closed**.
+    ///
+    /// [`dispatch_pre_tool_call`](Self::dispatch_pre_tool_call) returns an
+    /// error when a hook itself fails — a panic in a policy predicate, an
+    /// `ask_user` handler that could not reach the user. Both transports
+    /// previously treated that error as "no objection" and ran the tool, which
+    /// turns any hook bug into an open gate. A gate that cannot decide must
+    /// deny.
+    ///
+    /// `None` means no hooks are registered at all, which is not a failure:
+    /// there is nothing to object.
+    pub async fn gate_tool_call(runner: Option<&Self>, tool_call: &ToolCall) -> (bool, String) {
+        let Some(runner) = runner else {
+            return (true, String::new());
+        };
+        match runner.dispatch_pre_tool_call(tool_call).await {
+            Ok(res) if res.allow => (true, String::new()),
+            Ok(res) => (false, res.message),
+            Err(e) => {
+                tracing::error!(
+                    "pre_tool_call failed for {}; denying the call: {e:?}",
+                    tool_call.name
+                );
+                (
+                    false,
+                    format!("the pre-tool-call gate could not decide, so the call was denied: {e}"),
+                )
+            }
+        }
+    }
+
     pub async fn dispatch_post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
@@ -360,6 +391,41 @@ mod tests {
     use super::*;
     use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult, UsageMetadata};
     use std::sync::Mutex;
+
+    /// A hook whose gate cannot decide. Before S2 this ran the tool.
+    struct BrokenHook;
+
+    impl Hook for BrokenHook {
+        async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+            Err(anyhow::anyhow!("the policy store is unreachable"))
+        }
+    }
+
+    fn probe_call() -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            name: "RUN_COMMAND".to_string(),
+            args: serde_json::json!({}),
+            canonical_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_denies_when_a_hook_errors() {
+        let runner = HookRunner::new();
+        runner.register(Arc::new(BrokenHook)).await;
+        let (allow, reason) = HookRunner::gate_tool_call(Some(&runner), &probe_call()).await;
+        assert!(!allow, "a gate that cannot decide must not allow the call");
+        assert!(reason.contains("policy store is unreachable"), "{reason}");
+    }
+
+    /// No hooks registered is not a failure — there is nothing to object.
+    #[tokio::test]
+    async fn gate_allows_with_no_runner() {
+        let (allow, reason) = HookRunner::gate_tool_call(None, &probe_call()).await;
+        assert!(allow);
+        assert!(reason.is_empty());
+    }
 
     struct TrackerHook {
         name: String,

@@ -70,7 +70,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 
 | ID | What | Size |
 |---|---|---|
-| S2 | Make pre-tool gating **fail closed by construction** — it currently fails **open** at both transports when a hook errors | S |
+| ~~S2~~ | **Done** — `HookRunner::gate_tool_call` is the single decision point at both transports and both call sites; a hook that errors denies and the model is told the gate could not decide | S |
 | H4 | Narrow `on_tool_error`: never clear the error, never downgrade the step. It currently reports a failed tool to the model as a genuine success | M |
 | T1+T9 | Construct and inject the `ToolContext` — it is never constructed today, so context-aware tools do not work at all | S |
 | A1 | `TriggerRunner::stop` + double-start guard; `Agent::stop` calls it. Triggers currently outlive the agent | M |
@@ -195,7 +195,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 
 | # | Batch | Items | Size |
 |---|---|---|---|
-| D1 | Fail-closed gating | S2 | S |
+| ~~D1~~ | Fail-closed gating — **done** | S2 | S |
 | D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
 | D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
 | D4 | Tool runner | T7+T8, T4, T10, `finish-extractor` | M |

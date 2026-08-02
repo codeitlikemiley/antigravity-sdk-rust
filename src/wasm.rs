@@ -695,12 +695,8 @@ impl WasmConnectionStrategy {
                                                     let mut allow = true;
                                                     let tool_call = crate::step_extract::extract_builtin_tool_call(&step_update_clone);
                                                     if let Some(ref tc) = tool_call {
-                                                        if let Some(ref runner) = hook_runner {
-                                                            let pre_call = runner.dispatch_pre_tool_call(tc).await;
-                                                            if let Ok(res) = pre_call {
-                                                                allow = res.allow;
-                                                            }
-                                                        }
+                                                        // Fails closed: a hook that errors denies.
+                                                        (allow, _) = crate::hooks::HookRunner::gate_tool_call(hook_runner.as_ref(), tc).await;
                                                         if allow {
                                                             let key = (step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0));
                                                             pending_calls.lock().await.insert(key, tc.clone());
@@ -849,13 +845,9 @@ impl WasmConnectionStrategy {
                                                 };
                                                 let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(active_step)));
 
-                                                let allow = if let Some(runner) = hook_runner.as_ref() {
-                                                    let res = runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow);
-                                                    tracing::debug!("Policy decision for tool {}: allow={}", tc.name, res);
-                                                    res
-                                                } else {
-                                                    true
-                                                };
+                                                // Fails closed: a hook that errors denies.
+                                                let (allow, deny_reason) = crate::hooks::HookRunner::gate_tool_call(hook_runner.as_ref(), &tc).await;
+                                                tracing::debug!("Policy decision for tool {}: allow={}", tc.name, allow);
 
                                                 if !allow {
                                                     // Emit ERROR step for denied tool call
@@ -867,7 +859,11 @@ impl WasmConnectionStrategy {
                                                         target: StepTarget::Environment,
                                                         status: StepStatus::Error,
                                                         content: tc.name.clone(),
-                                                        error: "Execution denied by hook policy".to_string(),
+                                                        error: if deny_reason.is_empty() {
+                                                            "Execution denied by hook policy".to_string()
+                                                        } else {
+                                                            deny_reason.clone()
+                                                        },
                                                         tool_calls: vec![tc.clone()],
                                                         trajectory_id: traj_id,
                                                         ..Default::default()
