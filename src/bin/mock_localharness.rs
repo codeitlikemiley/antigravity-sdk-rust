@@ -64,6 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_lines)] // one branch per scripted scenario; splitting
+// them would scatter the wire format across helpers for no gain
 async fn handle_ws_connection(
     mut ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     client_lang: &str,
@@ -73,6 +75,23 @@ async fn handle_ws_connection(
     if let Some(msg_res) = ws_stream.next().await {
         let _ = msg_res?;
     }
+
+    // Answer the handshake. Since 0.1.4 this is the harness's mandatory first
+    // frame, and upstream's client blocks on it before doing anything else
+    // (local_connection.py:1162-1176). The SDK does not read it yet — that is
+    // WP-6 — but the mock must send it, or it will keep certifying a handshake
+    // no real harness performs.
+    let init_response = serde_json::json!({
+        "initializeConversationResponse": {
+            "cascadeId": "test_traj",
+            "history": []
+        },
+        "seqNum": "1",
+        "timestampMicros": "1"
+    });
+    ws_stream
+        .send(WsMessage::Text(init_response.to_string()))
+        .await?;
 
     // Read client user prompt message
     let mut prompt = String::new();
@@ -94,7 +113,72 @@ async fn handle_ws_connection(
         .send(WsMessage::Text(traj_running.to_string()))
         .await?;
 
-    if prompt.contains("trigger_terminal_error") {
+    if let Some(path) = prompt
+        .split("trigger_tool_confirmation:")
+        .nth(1)
+        .map(|rest| rest.trim_end_matches(['"', '}', ' ']).to_string())
+    {
+        // Drive a real pre-tool gate: a VIEW_FILE the harness wants confirmed.
+        // The SDK answers with ToolConfirmation{accepted}, which is the policy
+        // layer's decision observed from the outside — the only way to prove
+        // the enforcer is actually registered and consulted at runtime.
+        //
+        // STATE_WAITING_FOR_USER matters: the client only treats a confirmation
+        // request as new while the step is in that state.
+        let step_confirm = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": "Requesting confirmation",
+                "state": "STATE_WAITING_FOR_USER",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "viewFile": { "filePath": path },
+                "toolConfirmationRequest": {}
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(step_confirm.to_string()))
+            .await?;
+
+        // Wait for the client's decision and report it back in the turn's text,
+        // so a test can assert on it without reaching into the SDK.
+        let mut accepted = "none".to_string();
+        while let Some(msg_res) = ws_stream.next().await {
+            let WsMessage::Text(text) = msg_res? else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(confirmation) = value.get("toolConfirmation") {
+                accepted = confirmation
+                    .get("accepted")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    .to_string();
+                break;
+            }
+        }
+
+        let step_done = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 2,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": format!("accepted={accepted}"),
+                "textDelta": format!("accepted={accepted}"),
+                "state": "STATE_DONE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "finish": { "outputString": "\"done\"" }
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(step_done.to_string()))
+            .await?;
+    } else if prompt.contains("trigger_terminal_error") {
         let step_terminal = serde_json::json!({
             "stepUpdate": {
                 "stepIndex": 1,

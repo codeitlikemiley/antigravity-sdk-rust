@@ -231,3 +231,85 @@ async fn test_agent_terminal_error_propagation() {
 
     agent.stop().await.expect("Failed to stop agent");
 }
+
+/// End-to-end proof that the workspace sandbox is wired, not merely composed.
+///
+/// The unit tests in `src/agent.rs` show `compose_policies` produces the right
+/// policy list. They cannot show that the resulting enforcer is registered on
+/// the hook runner and consulted when the harness asks to run a tool. This
+/// drives a real `tool_confirmation_request` through the mock and reads back
+/// the `accepted` flag the SDK returns, which *is* the policy decision.
+///
+/// Covers the confirmation path only — the sole pre-tool gate the 0.1.1 wire
+/// has. Gating built-ins without a confirmation request needs the harness-side
+/// hook channel (WP-8).
+async fn confirmation_decision_for(path: &str) -> String {
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    config.capabilities = CapabilitiesConfig {
+        enabled_tools: Some(vec![BuiltinTools::ViewFile]),
+        ..Default::default()
+    };
+    // allow_all() used to switch the workspace sandbox off entirely. It must
+    // not any more — that is the regression this asserts end to end.
+    config.policies = Some(vec![policy::allow_all()]);
+    config.workspaces = Some(vec![
+        std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+
+    let agent = Agent::new(config)
+        .start()
+        .await
+        .expect("Failed to start agent");
+    let response = agent
+        .chat(&format!("trigger_tool_confirmation:{path}"))
+        .await
+        .expect("chat failed");
+    agent.stop().await.expect("Failed to stop agent");
+    response.text
+}
+
+#[tokio::test]
+async fn test_workspace_policy_denies_path_outside_workspace() {
+    let decision = confirmation_decision_for("/etc/passwd").await;
+    assert!(
+        decision.contains("accepted=false"),
+        "a file outside the workspace must be denied, got: {decision}"
+    );
+}
+
+#[tokio::test]
+async fn test_workspace_policy_allows_path_inside_workspace() {
+    let inside = std::env::current_dir().unwrap().join("Cargo.toml");
+    let decision = confirmation_decision_for(&inside.to_string_lossy()).await;
+    assert!(
+        decision.contains("accepted=true"),
+        "a file inside the workspace must be allowed, got: {decision}"
+    );
+}
+
+/// The traversal escape, end to end. `Path::starts_with` reported this as
+/// inside the workspace, so `view_file` on /etc/passwd was confirmed.
+#[tokio::test]
+async fn test_workspace_policy_denies_parent_traversal() {
+    let escape = std::env::current_dir()
+        .unwrap()
+        .join("../../etc/passwd")
+        .to_string_lossy()
+        .into_owned();
+    let decision = confirmation_decision_for(&escape).await;
+    assert!(
+        decision.contains("accepted=false"),
+        "a `..` escape must be denied, got: {decision}"
+    );
+}
