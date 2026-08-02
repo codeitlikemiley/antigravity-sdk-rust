@@ -692,7 +692,33 @@ impl WasmConnectionStrategy {
                                                 continue;
                                             }
 
-                                            if tsu.state == Some(2) { // STATE_FULLY_IDLE
+                                            // A turn that failed server-side reports its
+                                            // reason here; without this the stream just ends
+                                            // (event_processor.py:554-557).
+                                            if let Some(ref err) = tsu.error
+                                                && !err.is_empty()
+                                            {
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(anyhow!(
+                                                        "{err}"
+                                                    )),
+                                                );
+                                            }
+
+                                            if tsu.state == Some(3) { // STATE_CANCELLED
+                                                let reason = tsu
+                                                    .error
+                                                    .clone()
+                                                    .filter(|e| !e.is_empty())
+                                                    .unwrap_or_else(|| "Turn cancelled".to_string());
+                                                let _ = step_tx.send(
+                                                    crate::step_extract::StepEvent::Error(
+                                                        anyhow!(crate::error::AntigravityError::Cancelled(reason)),
+                                                    ),
+                                                );
+                                            }
+
+                                            if tsu.state == Some(2) || tsu.state == Some(3) { // STATE_FULLY_IDLE | STATE_CANCELLED
                                                 conn_is_idle.store(true, Ordering::SeqCst);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
                                                 let _ = step_tx.send(crate::step_extract::StepEvent::Idle);

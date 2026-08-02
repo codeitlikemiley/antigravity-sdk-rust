@@ -24,6 +24,15 @@ pub enum AntigravityError {
     #[error("Execution error: {0}")]
     Execution(String),
 
+    /// The turn was cancelled — by the caller via `Connection::cancel()`, or by
+    /// the harness reporting `STATE_CANCELLED`.
+    ///
+    /// Distinct from a completed turn: upstream raises
+    /// `AntigravityCancelledError` rather than ending the stream normally
+    /// (`local_connection.py:340-344`), so a caller can tell the two apart.
+    #[error("Cancelled: {0}")]
+    Cancelled(String),
+
     /// One or more input validation failures.
     #[error("Validation error: {message}")]
     Validation {
