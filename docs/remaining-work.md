@@ -71,7 +71,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | ID | What | Size |
 |---|---|---|
 | ~~S2~~ | **Done** — `HookRunner::gate_tool_call` is the single decision point at both transports and both call sites; a hook that errors denies and the model is told the gate could not decide | S |
-| H4 | Narrow `on_tool_error`: never clear the error, never downgrade the step. It currently reports a failed tool to the model as a genuine success | M |
+| ~~H4~~ | **Done** — `on_tool_error` returns `Option<String>`: it rewords the failure the model is shown and cannot clear it | M |
 | ~~T1+T9~~ | **Done** — `Agent::start` attaches a `ToolContext` built on a new `WeakConnection`, so context-aware tools work and the context does not keep the session alive | S |
 | ~~A1~~ | **Done** — `stop`/`is_running`/double-start guard, and `Agent::stop` stops triggers before disconnecting | M |
 | ~~A10~~ | **Done** — `TriggerContext::send` is the whole surface | S |
@@ -85,7 +85,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | tool-wire | New ungated module both transports delegate to | S |
 | ~~T5~~ | **Done** — absent or empty `arguments_json` is an empty object, not null | XS |
 | W8 | Route all six `ToolResponse` constructions through one function | S |
-| docs-on-tool-error | Rewrite the six documents that teach the removed behaviour | S |
+| ~~docs-on-tool-error~~ | **Done** — `docs/hooks.md`, both skill references and the skill's hooks example | S |
 | H1b | Dispatch `post_turn`; parameter → `&str` | S |
 | H1d+H16 | Dispatch `on_compaction`; parameter → `&Step` | XS |
 | ~~A2~~ | **Done** — per-turn and `Option`; the session total stays on `Conversation::total_usage` | XS |
@@ -197,7 +197,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 |---|---|---|---|
 | ~~D1~~ | Fail-closed gating — **done** | S2 | S |
 | D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
-| D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
+| ~~D3~~ | `on_tool_error` contract — **done** | H4 + the documents that teach the old behaviour | M |
 | D4 | Tool runner — **T7+T8, T10, `finish-extractor` done**; T4 (schema coercion) remains | T7+T8, T4, T10, `finish-extractor` | M |
 | D5 | `ToolContext` — **T1+T9 and state atomicity done**; X19's example remains (unit tests cover the behaviour) | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | ~~D6~~ | Triggers — **done** | A10, A1, A11 | M |

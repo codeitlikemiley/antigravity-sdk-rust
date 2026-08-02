@@ -16,7 +16,7 @@ The Python SDK splits hooks into separate base classes by category:
 |---|---|---|
 | **Inspect** (read-only) | `OnSessionStartHook`, `PostToolCallHook`, `OnSessionEndHook`, `PostTurnHook`, `OnCompactionHook` | Default no-op methods on `Hook` |
 | **Decide** (blocking) | `PreTurnHook`, `PreToolCallDecideHook` | `pre_turn()`, `pre_tool_call()` return `HookResult` |
-| **Transform** (modifying) | `OnToolErrorHook`, `OnInteractionHook` | `on_tool_error()`, `on_interaction()` return recovery data |
+| **Transform** (modifying) | `OnToolErrorHook`, `OnInteractionHook` | `on_tool_error()` rewords a failure, `on_interaction()` answers questions |
 
 The Rust SDK merges all of these into a **single `Hook` trait** with 9 async
 methods. Every method has a default no-op implementation, so you only override
@@ -78,17 +78,14 @@ pub trait Hook: Send + Sync {
 
     // ── Error recovery ─────────────────────────────────────────────
 
-    /// Called when a tool execution encounters an error.
-    /// Return `(HookResult { allow: true, .. }, Some(value))` to provide a
-    /// recovery payload instead of propagating the error.
+    /// Called when a tool execution fails.
+    /// Return `Some(message)` to replace the error text the model is shown;
+    /// `None` leaves it as it is. A failure cannot be turned into a success.
     async fn on_tool_error(
         &self,
-        error: &anyhow::Error,
-    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
-        Ok((
-            HookResult { allow: false, message: error.to_string() },
-            None,
-        ))
+        _error: &anyhow::Error,
+    ) -> Result<Option<String>, anyhow::Error> {
+        Ok(None)
     }
 
     // ── User interaction ───────────────────────────────────────────
@@ -605,6 +602,32 @@ impl antigravity_sdk_rust::hooks::Hook for MyHook {}
 let mut agent = Agent::builder().allow_all().build();
 agent.register_hook(Arc::new(MyHook) as Arc<dyn DynHook>);
 // agent.start().await?;
+```
+
+## `on_tool_error` rewords, it does not recover
+
+A tool that failed stays failed. `on_tool_error` returns `Option<String>`: the
+error text the model is shown, or `None` to leave it alone. The first hook with
+an opinion wins, and a hook that itself errors is logged and skipped.
+
+It used to be able to substitute a result and clear the error, which reported a
+tool that had failed to the model as having worked and downgraded the step from
+`Error` to `Done`. Upstream narrowed this for the same reason. Recovery belongs
+inside the tool, where it can decide whether the fallback is honest.
+
+```rust,no_run
+# use antigravity_sdk_rust::hooks::Hook;
+struct Explain;
+
+impl Hook for Explain {
+    async fn on_tool_error(&self, error: &anyhow::Error) -> Result<Option<String>, anyhow::Error> {
+        if error.to_string().contains("response too large") {
+            // The model can act on this; it cannot act on a stack trace.
+            return Ok(Some("the result was too large — request fewer rows".to_string()));
+        }
+        Ok(None)
+    }
+}
 ```
 
 ## A hook that errors denies the call

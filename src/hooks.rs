@@ -52,23 +52,21 @@ pub trait Hook: Send + Sync {
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async { Ok(()) }
     }
-    /// Triggered when a tool execution encounters an error.
-    /// Allows fallback logic or customized error payloads.
+    /// Triggered when a tool execution fails.
+    ///
+    /// Returning `Some(message)` **replaces the error text** the model is
+    /// shown — useful for turning a stack trace into an instruction the model
+    /// can act on. Returning `None` leaves it as it is.
+    ///
+    /// It cannot turn a failure into a success. It used to: a hook could
+    /// substitute a result and clear the error, so a tool that had failed was
+    /// reported to the model as having worked, and the step was downgraded from
+    /// `Error` to `Done`. Upstream narrowed this in 0.1.6 for the same reason.
     fn on_tool_error<'a>(
         &'a self,
-        error: &'a anyhow::Error,
-    ) -> impl std::future::Future<
-        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
-    > + Send {
-        async move {
-            Ok((
-                HookResult {
-                    allow: false,
-                    message: error.to_string(),
-                },
-                None,
-            ))
-        }
+        _error: &'a anyhow::Error,
+    ) -> impl std::future::Future<Output = Result<Option<String>, anyhow::Error>> + Send {
+        async { Ok(None) }
     }
     /// Intercepts a prompt to ask the user clarifying questions.
     fn on_interaction<'a>(
@@ -122,11 +120,11 @@ pub trait DynHook: Send + Sync {
         result: &'a ToolResult,
     ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
 
-    /// Triggered when a tool execution encounters an error.
+    /// Triggered when a tool execution fails; may replace the error text.
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
-    ) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>>;
+    ) -> BoxFuture<'a, Result<Option<String>, anyhow::Error>>;
 
     /// Intercepts a prompt to ask the user clarifying questions.
     fn on_interaction<'a>(
@@ -173,7 +171,7 @@ impl<T: Hook + ?Sized> DynHook for T {
     fn on_tool_error<'a>(
         &'a self,
         error: &'a anyhow::Error,
-    ) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>> {
+    ) -> BoxFuture<'a, Result<Option<String>, anyhow::Error>> {
         Box::pin(async move { self.on_tool_error(error).await })
     }
 
@@ -304,39 +302,25 @@ impl HookRunner {
         Ok(())
     }
 
-    pub async fn dispatch_on_tool_error(
-        &self,
-        error: &anyhow::Error,
-    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
+    /// Gives each hook a chance to reword a tool failure.
+    ///
+    /// The first hook to return a replacement wins. A hook that errors is
+    /// logged and skipped — one broken hook must not suppress the ones after
+    /// it, and must not replace the tool's failure with its own.
+    ///
+    /// The failure itself always stands: this cannot clear the error.
+    pub async fn dispatch_on_tool_error(&self, error: &anyhow::Error) -> Option<String> {
         let hooks = self.hooks.read().await.clone();
         for hook in &hooks {
-            // Contain a failing hook rather than aborting the chain with `?`.
-            // Upstream logs and converts it into a denial (0.1.1
-            // hook_runner.py:231-242); propagating instead meant one broken
-            // error-recovery hook suppressed every hook registered after it,
-            // and the original tool error was replaced by the hook's.
             match hook.on_tool_error(error).await {
-                Ok((res, val)) if res.allow => return Ok((res, val)),
-                Ok(_) => {}
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => {}
                 Err(hook_err) => {
                     tracing::error!("on_tool_error hook failed: {hook_err:?}");
-                    return Ok((
-                        HookResult {
-                            allow: false,
-                            message: format!("Error recovery failed: {hook_err}"),
-                        },
-                        None,
-                    ));
                 }
             }
         }
-        Ok((
-            HookResult {
-                allow: false,
-                message: error.to_string(),
-            },
-            None,
-        ))
+        None
     }
 
     pub async fn dispatch_interaction(
@@ -488,27 +472,15 @@ mod tests {
         async fn on_tool_error(
             &self,
             _error: &anyhow::Error,
-        ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
+        ) -> Result<Option<String>, anyhow::Error> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("{}:on_tool_error", self.name));
             if self.name == "recover" {
-                Ok((
-                    HookResult {
-                        allow: true,
-                        message: "recovered".to_string(),
-                    },
-                    Some(serde_json::json!({"recovered": true})),
-                ))
+                Ok(Some("reworded".to_string()))
             } else {
-                Ok((
-                    HookResult {
-                        allow: false,
-                        message: "not recovered".to_string(),
-                    },
-                    None,
-                ))
+                Ok(None)
             }
         }
 
@@ -694,8 +666,7 @@ mod tests {
     }
 
     /// A hook that errors must not silence the hooks registered after it, and
-    /// must not replace the tool's failure with its own (upstream 0.1.1
-    /// hook_runner.py:231-242 logs and denies).
+    /// must not replace the tool's failure with its own.
     #[tokio::test]
     async fn test_dispatch_on_tool_error_contains_a_failing_hook() {
         struct FailingHook;
@@ -703,52 +674,61 @@ mod tests {
             async fn on_tool_error(
                 &self,
                 _error: &anyhow::Error,
-            ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
+            ) -> Result<Option<String>, anyhow::Error> {
                 Err(anyhow::anyhow!("hook exploded"))
+            }
+        }
+        struct RewordingHook;
+        impl Hook for RewordingHook {
+            async fn on_tool_error(
+                &self,
+                _error: &anyhow::Error,
+            ) -> Result<Option<String>, anyhow::Error> {
+                Ok(Some("try a smaller page size".to_string()))
             }
         }
 
         let runner = HookRunner::new();
         runner.register(Arc::new(FailingHook)).await;
+        runner.register(Arc::new(RewordingHook)).await;
 
-        let (res, val) = runner
+        let replacement = runner
             .dispatch_on_tool_error(&anyhow::anyhow!("original tool failure"))
-            .await
-            .unwrap();
+            .await;
 
-        assert!(!res.allow);
-        assert!(res.message.contains("Error recovery failed"));
-        assert!(val.is_none());
+        assert_eq!(replacement.as_deref(), Some("try a smaller page size"));
+    }
+
+    /// No hook with an opinion leaves the tool's own message standing.
+    #[tokio::test]
+    async fn test_dispatch_on_tool_error_defaults_to_no_replacement() {
+        let runner = HookRunner::new();
+        assert!(
+            runner
+                .dispatch_on_tool_error(&anyhow::anyhow!("boom"))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
-    async fn test_dispatch_on_tool_error_recovery_short_circuits() {
+    async fn test_dispatch_on_tool_error_first_replacement_wins() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner
-            .register(Arc::new(TrackerHook {
-                name: "h1".to_string(),
-                calls: calls.clone(),
-            }))
-            .await;
-        runner
-            .register(Arc::new(TrackerHook {
-                name: "recover".to_string(),
-                calls: calls.clone(),
-            }))
-            .await;
-        runner
-            .register(Arc::new(TrackerHook {
-                name: "h2".to_string(),
-                calls: calls.clone(),
-            }))
-            .await;
+        for name in ["h1", "recover", "h2"] {
+            runner
+                .register(Arc::new(TrackerHook {
+                    name: name.to_string(),
+                    calls: calls.clone(),
+                }))
+                .await;
+        }
 
         let err = anyhow::anyhow!("error occurred");
-        let (res, val) = runner.dispatch_on_tool_error(&err).await.unwrap();
-        assert!(res.allow);
-        assert_eq!(res.message, "recovered");
-        assert_eq!(val.unwrap(), serde_json::json!({"recovered": true}));
+        assert_eq!(
+            runner.dispatch_on_tool_error(&err).await.as_deref(),
+            Some("reworded")
+        );
 
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded, vec!["h1:on_tool_error", "recover:on_tool_error"]);

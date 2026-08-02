@@ -1174,7 +1174,7 @@ impl LocalConnectionStrategy {
                                                         let err = anyhow!(err_msg);
                                                         let runner_clone = runner.clone();
                                                         tokio::spawn(async move {
-                                                            let _ = runner_clone.dispatch_on_tool_error(&err).await;
+                                                            runner_clone.dispatch_on_tool_error(&err).await;
                                                         });
                                                     }
                                                 }
@@ -1517,12 +1517,12 @@ impl LocalConnectionStrategy {
                                                 }
 
                                                 if let (Some(err_str), Some(runner)) = (result.error.as_ref(), hook_runner.as_ref()) {
-                                                    if let Ok((res, val)) = runner.dispatch_on_tool_error(&anyhow!(err_str.clone())).await {
-                                                        let allow_error = res.allow;
-                                                        if allow_error {
-                                                            result.result = val;
-                                                            result.error = None;
-                                                        }
+                                                    // The hook may reword the failure. It may not
+                                                    // turn it into a success: clearing the error
+                                                    // reported a tool that had failed to the model
+                                                    // as having worked (H4).
+                                                    if let Some(message) = runner.dispatch_on_tool_error(&anyhow!(err_str.clone())).await {
+                                                        result.error = Some(message);
                                                     }
                                                 } else if let Some(runner) = hook_runner.as_ref() {
                                                     let _ = runner.dispatch_post_tool_call(&result).await;

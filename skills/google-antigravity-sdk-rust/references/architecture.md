@@ -9,7 +9,7 @@ The SDK orchestrates the interactions between an LLM-based agent (running inside
 * **`Agent`**: Encapsulates binary discovery, workspace checks, safety policy enforcement, and registers tools/hooks.
 * **`Conversation`**: Manages a stateful agent turn. It coordinates the chat completion stream, accumulates step history, and decodes thoughts and text responses.
 * **`Connection`**: The abstract communication trait. This allows swap-in backends (e.g. standard subprocess IPC or WebSockets).
-* **`Hook`**: Callback observers (`on_session_start`, `pre_turn`, `pre_tool_call`, `post_tool_call`, `on_tool_error`, `on_interaction`) allowing custom logic injection.
+* **`Hook`**: Callback observers (`on_session_start`, `pre_turn`, `pre_tool_call`, `post_tool_call`, `on_tool_error` — rewords a failure, cannot clear it — `on_interaction`) allowing custom logic injection.
 * **`Policy`**: Middleware layer enforcing rules (e.g., workspace lock, prompt-to-run).
 * **`Tool`**: Custom Rust capabilities exposed to the Gemini model.
 
