@@ -164,7 +164,7 @@ That is the milestone worth cutting a release around.
 | # | Batch | Items | Size |
 |---|---|---|---|
 | B1 | Policy ergonomics | S15, N8 | XS |
-| B2 | Hook plumbing module — **module + `gate_turn` done**; H1c and H9 remain | `hook-dispatch`, H1c, H9 | S |
+| ~~B2~~ | Hook plumbing module — **done**. H1c (`session_end` from `disconnect`) and H9 (contain an erroring `on_tool_error`) already landed earlier in this branch; H9's shape changed again with H4 | `hook-dispatch`, H1c, H9 | S |
 | ~~B3~~ | Turn hooks — **done** | H1a (`pre_turn` with deny semantics), H12 | S |
 | ~~B4~~ | Conversation drain — **done** | A5 + `wait-for-idle` | M |
 | B5 | Structured tool results | N3 | M |
