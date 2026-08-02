@@ -189,6 +189,58 @@ async fn handle_ws_connection(
         ws_stream
             .send(WsMessage::Text(step_done.to_string()))
             .await?;
+    } else if prompt.contains("trigger_hook_request") {
+        // The real harness blocks its turn here. If the client never answers,
+        // this branch stalls and the test times out — which is exactly the
+        // failure the router exists to prevent.
+        let hook_request = serde_json::json!({
+            "callHookRequest": {
+                "requestId": "hook-1",
+                "name": "pre_tool",
+                "type": "LIFECYCLE_HOOK_PRE_TOOL",
+                "preToolArgs": {
+                    "toolName": "RUN_COMMAND",
+                    "argumentsJson": "{\"command_line\":\"rm -rf /\"}"
+                }
+            }
+        });
+        ws_stream
+            .send(WsMessage::Text(hook_request.to_string()))
+            .await?;
+
+        let mut decision = "none".to_string();
+        while let Some(msg_res) = ws_stream.next().await {
+            let WsMessage::Text(text) = msg_res? else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(response) = value.get("callHookResponse") {
+                decision = response
+                    .get("preToolResult")
+                    .and_then(|r| r.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("missing")
+                    .to_string();
+                break;
+            }
+        }
+
+        let step = serde_json::json!({
+            "stepUpdate": {
+                "stepIndex": 1,
+                "cascadeId": "test_traj",
+                "trajectoryId": "test_traj",
+                "text": format!("hook decision={decision}"),
+                "textDelta": format!("hook decision={decision}"),
+                "state": "STATE_DONE",
+                "source": "SOURCE_MODEL",
+                "target": "TARGET_USER",
+                "finish": { "outputString": "\"done\"" }
+            }
+        });
+        ws_stream.send(WsMessage::Text(step.to_string())).await?;
     } else if prompt.contains("trigger_subagent") {
         // Upstream's subagent fixture: a main-trajectory step establishes the
         // main trajectory, a step on a second trajectory carries the subagent's

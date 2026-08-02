@@ -198,3 +198,255 @@ mod tests {
         assert!(err.contains("quota lookup failed"), "{err}");
     }
 }
+
+/// Answers a harness-side `CallHookRequest`.
+///
+/// The harness **blocks its turn** until it gets a `CallHookResponse` carrying
+/// the matching `request_id`. Every path through this function therefore
+/// produces one — including the unreachable ones. A request this side does not
+/// understand is answered with `error_message`, which the harness treats as a
+/// hook failure; not answering at all is a deadlock.
+///
+/// Deny semantics match the local gates: a hook that errors refuses, because a
+/// gate that cannot decide must not fall open.
+pub async fn answer_hook_request(
+    runner: Option<&HookRunner>,
+    request: &crate::proto::localharness::CallHookRequest,
+) -> crate::proto::localharness::CallHookResponse {
+    use crate::proto::localharness::{
+        CallHookResponse, EmptyResult, OnToolErrorResult, PreToolResult, PreTurnResult,
+        call_hook_request::Args, call_hook_response::Result as ResponseResult, pre_tool_result,
+        pre_turn_result,
+    };
+
+    let request_id = request.request_id.clone();
+    let answer = |result: ResponseResult| CallHookResponse {
+        request_id: request_id.clone(),
+        result: Some(result),
+    };
+
+    let Some(runner) = runner else {
+        // No hooks registered at all: nothing to object, and the turn must not
+        // stall waiting for an opinion that does not exist.
+        return answer(ResponseResult::EmptyResult(EmptyResult {}));
+    };
+
+    match request.args.as_ref() {
+        Some(Args::PreTurnArgs(_)) => {
+            let (decision, reason) = match gate_turn(Some(runner)).await {
+                Ok(()) => (pre_turn_result::Decision::Allow, String::new()),
+                Err(e) => (pre_turn_result::Decision::Deny, e.to_string()),
+            };
+            answer(ResponseResult::PreTurnResult(PreTurnResult {
+                decision: Some(decision as i32),
+                reason: Some(reason),
+            }))
+        }
+        Some(Args::PreToolArgs(args)) => {
+            let tool_call = crate::types::ToolCall {
+                id: request.request_id.clone().unwrap_or_default(),
+                name: args.tool_name.clone().unwrap_or_default(),
+                args: crate::tool_wire::parse_arguments(args.arguments_json.as_deref()),
+                canonical_path: None,
+                server_name: args.server_name.clone(),
+            };
+            let (allow, reason) = HookRunner::gate_tool_call(Some(runner), &tool_call).await;
+            answer(ResponseResult::PreToolResult(PreToolResult {
+                decision: Some(if allow {
+                    pre_tool_result::Decision::Allow as i32
+                } else {
+                    pre_tool_result::Decision::Deny as i32
+                }),
+                reason: Some(reason),
+                // Rewriting the model's arguments is a capability this side does
+                // not offer; sending the field back unchanged would be a lie
+                // about having considered it.
+                modified_arguments_json: None,
+            }))
+        }
+        Some(Args::PostToolArgs(args)) => {
+            let result = crate::types::ToolResult {
+                name: args.tool_name.clone().unwrap_or_default(),
+                id: request.request_id.clone(),
+                result: args.result.clone().map(serde_json::Value::String),
+                error: args.error.clone().filter(|e| !e.is_empty()),
+                server_name: args.server_name.clone(),
+                exception: None,
+            };
+            if let Err(e) = runner.dispatch_post_tool_call(&result).await {
+                tracing::error!("post_tool_call hook failed: {e:?}");
+            }
+            answer(ResponseResult::EmptyResult(EmptyResult {}))
+        }
+        Some(Args::PostTurnArgs(args)) => {
+            let text = args.response_text.clone().unwrap_or_default();
+            if let Err(e) = runner.dispatch_post_turn(&text).await {
+                tracing::error!("post_turn hook failed: {e:?}");
+            }
+            answer(ResponseResult::EmptyResult(EmptyResult {}))
+        }
+        Some(Args::OnToolErrorArgs(args)) => {
+            let error = anyhow::anyhow!(
+                "{}",
+                args.error_message
+                    .clone()
+                    .unwrap_or_else(|| "tool failed".to_string())
+            );
+            let replacement = runner.dispatch_on_tool_error(&error).await;
+            answer(ResponseResult::OnToolErrorResult(OnToolErrorResult {
+                custom_error_message: replacement,
+            }))
+        }
+        None => answer(ResponseResult::ErrorMessage(format!(
+            "hook request {:?} carried no arguments this SDK understands",
+            request.r#type
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod router_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::answer_hook_request;
+    use crate::hooks::{Hook, HookRunner};
+    use crate::proto::localharness::{
+        CallHookRequest, OnToolErrorArgs, PostTurnArgs, PreToolArgs, PreTurnArgs,
+        call_hook_request::Args, call_hook_response::Result as ResponseResult, pre_tool_result,
+        pre_turn_result,
+    };
+    use crate::types::{HookResult, ToolCall};
+    use std::sync::Arc;
+
+    fn request(args: Args) -> CallHookRequest {
+        CallHookRequest {
+            request_id: Some("r1".to_string()),
+            name: Some("h".to_string()),
+            r#type: None,
+            args: Some(args),
+        }
+    }
+
+    struct Denier;
+
+    impl Hook for Denier {
+        async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
+            Ok(HookResult {
+                allow: false,
+                message: "not on my watch".to_string(),
+            })
+        }
+        async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+            Err(anyhow::anyhow!("cannot decide"))
+        }
+        async fn on_tool_error(
+            &self,
+            _error: &anyhow::Error,
+        ) -> Result<Option<String>, anyhow::Error> {
+            Ok(Some("try fewer rows".to_string()))
+        }
+    }
+
+    /// Every path must answer, and every answer must carry the request id the
+    /// harness is blocking on.
+    #[tokio::test]
+    async fn every_request_is_answered_with_its_id() {
+        let runner = HookRunner::new();
+        runner.register(Arc::new(Denier)).await;
+
+        for args in [
+            Args::PreTurnArgs(PreTurnArgs { user_input: None }),
+            Args::PreToolArgs(PreToolArgs {
+                tool_name: Some("RUN_COMMAND".to_string()),
+                arguments_json: None,
+                server_name: None,
+            }),
+            Args::PostTurnArgs(PostTurnArgs {
+                response_text: Some("done".to_string()),
+            }),
+            Args::OnToolErrorArgs(OnToolErrorArgs {
+                tool_name: Some("lookup".to_string()),
+                error_message: Some("boom".to_string()),
+                server_name: None,
+            }),
+        ] {
+            let response = answer_hook_request(Some(&runner), &request(args)).await;
+            assert_eq!(response.request_id.as_deref(), Some("r1"));
+            assert!(response.result.is_some(), "an unanswered request deadlocks");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denied_tool_call_comes_back_as_deny_with_its_reason() {
+        let runner = HookRunner::new();
+        runner.register(Arc::new(Denier)).await;
+        let response = answer_hook_request(
+            Some(&runner),
+            &request(Args::PreToolArgs(PreToolArgs {
+                tool_name: Some("RUN_COMMAND".to_string()),
+                arguments_json: None,
+                server_name: None,
+            })),
+        )
+        .await;
+        match response.result.unwrap() {
+            ResponseResult::PreToolResult(r) => {
+                assert_eq!(r.decision, Some(pre_tool_result::Decision::Deny as i32));
+                assert_eq!(r.reason.as_deref(), Some("not on my watch"));
+            }
+            other => panic!("unexpected result {other:?}"),
+        }
+    }
+
+    /// A gate that cannot decide refuses, matching the local gates.
+    #[tokio::test]
+    async fn a_failing_pre_turn_hook_denies_the_turn() {
+        let runner = HookRunner::new();
+        runner.register(Arc::new(Denier)).await;
+        let response = answer_hook_request(
+            Some(&runner),
+            &request(Args::PreTurnArgs(PreTurnArgs { user_input: None })),
+        )
+        .await;
+        match response.result.unwrap() {
+            ResponseResult::PreTurnResult(r) => {
+                assert_eq!(r.decision, Some(pre_turn_result::Decision::Deny as i32));
+                assert!(r.reason.unwrap().contains("cannot decide"));
+            }
+            other => panic!("unexpected result {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_request_is_answered_with_an_error() {
+        let runner = HookRunner::new();
+        let response = answer_hook_request(
+            Some(&runner),
+            &CallHookRequest {
+                request_id: Some("r9".to_string()),
+                name: None,
+                r#type: None,
+                args: None,
+            },
+        )
+        .await;
+        assert_eq!(response.request_id.as_deref(), Some("r9"));
+        assert!(matches!(
+            response.result.unwrap(),
+            ResponseResult::ErrorMessage(_)
+        ));
+    }
+
+    /// No hooks registered is not a failure: answer empty rather than stall.
+    #[tokio::test]
+    async fn no_runner_still_answers() {
+        let response = answer_hook_request(
+            None,
+            &request(Args::PreTurnArgs(PreTurnArgs { user_input: None })),
+        )
+        .await;
+        assert!(matches!(
+            response.result.unwrap(),
+            ResponseResult::EmptyResult(_)
+        ));
+    }
+}

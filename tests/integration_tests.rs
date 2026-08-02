@@ -533,3 +533,39 @@ async fn test_post_turn_fires_with_the_final_text() {
 
     agent.stop().await.expect("stop");
 }
+
+/// The harness blocks its turn until a `CallHookResponse` comes back. Before
+/// the router existed this arm only logged a warning, so a harness that sent
+/// one would have stalled — which is why `enabled_hooks` could not be emitted.
+#[tokio::test]
+async fn test_harness_hook_request_is_answered() {
+    let mut config = AgentConfig::default();
+    config.binary_path = Some(
+        std::env::var("CARGO_BIN_EXE_mock_localharness")
+            .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`"),
+    );
+    config.gemini_config = GeminiConfig {
+        api_key: Some("test_api_key".to_string()),
+        ..Default::default()
+    };
+    // A policy the router must consult: RUN_COMMAND is denied.
+    config.policies = Some(vec![policy::deny("RUN_COMMAND"), policy::allow_all()]);
+    config.conversation_id = Some("test-conv-hookreq-0123456789abcd".to_string());
+
+    let agent = Agent::new(config).start().await.expect("start");
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        agent.chat("trigger_hook_request"),
+    )
+    .await
+    .expect("the harness stalled waiting for a CallHookResponse")
+    .expect("chat failed");
+
+    assert!(
+        response.text.contains("decision=DENY"),
+        "the router did not consult the policy; saw {:?}",
+        response.text
+    );
+
+    agent.stop().await.expect("stop");
+}

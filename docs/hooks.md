@@ -686,9 +686,21 @@ impl Hook for Audit {
 }
 ```
 
-`enabled_hooks` is **not emitted yet** — the harness-side router does not exist,
-and emitting the field before it does would deadlock the turn rather than being
-a no-op.
+`enabled_hooks` now carries exactly what registered hooks declared. It became
+safe to emit only once the router existed: the harness blocks its turn waiting
+for a `CallHookResponse` for every kind named in that field, so emitting it
+first would have deadlocked the turn rather than being a no-op.
+
+## Harness-side hook requests
+
+The harness dispatches `CallHookRequest` for every declared kind and waits.
+Every path through the router answers, including a request it does not
+understand — that one is answered with `error_message`, which the harness treats
+as a hook failure. Not answering is a deadlock.
+
+Deny semantics match the local gates: a hook that errors refuses, because a gate
+that cannot decide must not fall open. Rewriting the model's arguments is not
+offered, so `modified_arguments_json` comes back unset rather than echoed.
 
 ## Hook and tool state
 

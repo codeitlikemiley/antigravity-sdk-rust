@@ -644,6 +644,11 @@ impl LocalConnectionStrategy {
         let (mut ws_write, mut ws_read) = ws.split();
 
         // 4. Build HarnessConfig proto
+        let declared_hook_kinds = match self.hook_runner {
+            Some(ref runner) => runner.declared_kinds().await,
+            None => crate::hook_dispatch::HookKinds::NONE,
+        };
+
         let mut proto_tools = Vec::new();
         let mut registered_tool_names: Vec<String> = Vec::new();
         if let Some(ref runner) = self.tool_runner {
@@ -799,7 +804,12 @@ impl LocalConnectionStrategy {
                 .session_continuation_mode
                 .map(crate::types::SessionContinuationMode::as_proto),
             retry_config: None,
-            enabled_hooks: Vec::new(),
+            // Only what a registered hook declared. The harness blocks its
+            // turn waiting for a CallHookResponse for every kind named here,
+            // and `answer_hook_request` is what makes that safe — emitting this
+            // before the router existed would have turned a silent no-op into a
+            // mid-turn deadlock (E5).
+            enabled_hooks: declared_hook_kinds.to_proto(),
             custom_subagents: crate::harness_config::build_custom_subagents_proto(
                 &self.subagents,
                 &registered_tool_names,
@@ -1443,16 +1453,25 @@ impl LocalConnectionStrategy {
                                             );
                                         }
                                         crate::proto::localharness::output_event::Event::CallHookRequest(req) => {
-                                            // Harness-side lifecycle hooks (WP-8). The harness only
-                                            // sends these for hooks named in HarnessConfig.enabled_hooks,
-                                            // which this crate does not populate, so reaching here means
-                                            // the two have gone out of sync. The harness blocks its turn
-                                            // waiting for a CallHookResponse we cannot yet send.
-                                            tracing::warn!(
-                                                "unexpected call_hook_request (id={:?}, type={:?}); no hook router — the harness may stall. See WP-8",
-                                                req.request_id,
-                                                req.r#type
-                                            );
+                                            // The harness blocks its turn until a
+                                            // CallHookResponse with this request_id comes
+                                            // back, so this arm must always answer — even
+                                            // when it does not understand the request.
+                                            let hook_runner = hook_runner.clone();
+                                            let conn_ws_tx = conn_ws_tx.clone();
+                                            tokio::spawn(async move {
+                                                let response = crate::hook_dispatch::answer_hook_request(
+                                                    hook_runner.as_ref(),
+                                                    &req,
+                                                )
+                                                .await;
+                                                let input_event = InputEvent {
+                                                    event: Some(crate::proto::localharness::input_event::Event::CallHookResponse(response)),
+                                                };
+                                                if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                    let _ = conn_ws_tx.send(raw_json);
+                                                }
+                                            });
                                         }
                                         crate::proto::localharness::output_event::Event::SessionEndResponse(_) => {
                                             // Answer to a session_end_request we do not send yet (WP-6).

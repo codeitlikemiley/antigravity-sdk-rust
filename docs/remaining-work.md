@@ -217,14 +217,15 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~E1~~ | Hook kind registry — **done**. `HookKinds` is opt-in and covers exactly the seven `LifecycleHook` members; `on_interaction`/`on_compaction` have none, so they stay local-only | M |
 | ~~E2~~ | Shared state store — **done**. `src/state.rs`; both contexts delegate. The two stores stay separate data, deliberately | M |
 | E3 | Hook context threading | H5 — the context parameter on every `Hook` method | L |
-| E4 | Hook proto + router | H2 — `CallHookRequest`/`Response`, the 7-entry table, always-answer guarantee | L |
-| E5 | Turn on `enabled_hooks` | Emit field 16; reduce the confirmation arm to an unconditional accept | S |
+| ~~E4~~ | Hook proto + router — **done**. `answer_hook_request` answers every path including the ones it does not understand; an unanswered request is a deadlock, not a no-op | L |
+| ~~E5~~ | Turn on `enabled_hooks` — **done**, and only now that the router answers. The field carries exactly what registered hooks declared | S |
 | E6 | Public API surface | WP-10: multimodal prompts, slash commands, `Connection` trait | L |
 | E7 | Docs, examples, drift job — **the drift job is done** (`scripts/check_upstream_drift.py`, weekly + advisory on PRs, verified against the live 0.1.9 release). Docs and examples have been updated batch by batch alongside the code | WP-11 | M |
 
-> **E5 must be last in Phase E.** Emitting `enabled_hooks` before the router
-> exists converts a silent no-op into a mid-turn deadlock: the harness blocks
-> waiting for a `CallHookResponse` nothing can send.
+> **E5 was last, as required.** It landed only after E4's router, because
+> emitting `enabled_hooks` before one exists converts a silent no-op into a
+> mid-turn deadlock — the harness blocks waiting for a `CallHookResponse`
+> nothing can send. `test_harness_hook_request_is_answered` pins the guarantee.
 
 ### Suggested cut points
 
