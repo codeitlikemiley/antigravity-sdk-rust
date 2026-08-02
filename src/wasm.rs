@@ -591,7 +591,15 @@ impl WasmConnectionStrategy {
                                                 let step_index = step_update.step_index;
                                                 crate::spawn_task(async move {
                                                     let mut questions_list = Vec::new();
-                                                    for uq in &q_req_clone.questions {
+                                                    // The hook only sees multiple-choice questions,
+                                                    // so the response index is an index into the
+                                                    // FILTERED list. Carry the original index or
+                                                    // every answer after a non-multiple-choice
+                                                    // question is recorded against the wrong one.
+                                                    let mut original_indices: Vec<usize> = Vec::new();
+                                                    for (original_index, uq) in
+                                                        q_req_clone.questions.iter().enumerate()
+                                                    {
                                                         if let Some(crate::proto::localharness::user_question::QuestionType::MultipleChoice(ref mc)) = uq.question_type {
                                                             let mut opts = Vec::new();
                                                             for (j, choice) in mc.choices.iter().enumerate() {
@@ -600,6 +608,7 @@ impl WasmConnectionStrategy {
                                                                     text: choice.clone(),
                                                                 });
                                                             }
+                                                            original_indices.push(original_index);
                                                             questions_list.push(AskQuestionEntry {
                                                                 question: mc.question.clone().unwrap_or_default(),
                                                                 options: opts,
@@ -618,7 +627,17 @@ impl WasmConnectionStrategy {
                                                     if let Some(runner) = hook_runner.as_ref().filter(|_| !questions_list.is_empty()) {
                                                         let res = runner.dispatch_interaction(&questions_list).await;
                                                         if let Ok(Some(q_res)) = res {
-                                                            for (orig_idx, r) in q_res.responses.iter().enumerate() {
+                                                            for (filtered_idx, r) in
+                                                                q_res.responses.iter().enumerate()
+                                                            {
+                                                                // A hook may return more responses
+                                                                // than there were questions; ignore
+                                                                // the extras rather than panicking.
+                                                                let Some(&orig_idx) =
+                                                                    original_indices.get(filtered_idx)
+                                                                else {
+                                                                    break;
+                                                                };
                                                                 if !r.skipped {
                                                                     let mut mc_ans = MultipleChoiceAnswer {
                                                                         selected_choice_indices: Vec::new(),

@@ -107,7 +107,6 @@ blocked on the migration.
 
 | ID | What | Size |
 |---|---|---|
-| question-answer-index-mismatch | Answers are written at the wrong index whenever a question is not multiple-choice; a hook returning more responses than questions indexes out of bounds | XS |
 | wait-for-idle | `Connection` has no `wait_for_idle`; A5 ships an unsound poll loop without it | S |
 | harness-crash-diagnostics | A harness crash ends the step stream silently and the captured stderr is discarded | S |
 | predicate-args-fidelity | Policy predicate args drop `ActionEditFile.diff_block` and inject non-proto keys | S |
