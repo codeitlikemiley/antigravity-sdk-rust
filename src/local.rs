@@ -45,9 +45,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// Connection strategy implementation communicating with a local subprocess harness.
 ///
@@ -531,7 +532,17 @@ impl LocalConnectionStrategy {
         let mut ws_stream = None;
         let mut delay = std::time::Duration::from_millis(100);
         for attempt in 0..5 {
-            match connect_async(req.clone()).await {
+            // Tool results and file contents routinely exceed tungstenite's
+            // default 16 MiB frame / 64 MiB message caps, and upstream sets
+            // max_size=None for exactly that reason
+            // (local_connection.py:1086-1092). Hitting the cap kills the
+            // connection mid-turn rather than truncating.
+            let ws_config = WebSocketConfig {
+                max_message_size: None,
+                max_frame_size: None,
+                ..WebSocketConfig::default()
+            };
+            match connect_async_with_config(req.clone(), Some(ws_config), false).await {
                 Ok((stream, _)) => {
                     ws_stream = Some(stream);
                     break;

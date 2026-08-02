@@ -113,7 +113,6 @@ blocked on the migration.
 | ask-question-builtin | `BuiltinTools` missing `ASK_QUESTION`; `user_questions.enabled` hardcoded | XS |
 | tool-context-state-atomicity | Add `update_state` before X19 publishes a read-modify-write race as the flagship example | XS |
 | policy-docs-and-tool-name-selectors | `docs/policy.md` is referenced by the plan but created by nothing; shipped policy examples can never match | S |
-| step-error-and-ws-limits | `ActionError.error_message` is never read; WS message size at tungstenite defaults | XS |
 
 ---
 
