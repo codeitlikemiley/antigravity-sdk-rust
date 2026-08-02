@@ -46,17 +46,166 @@ impl SessionContinuationMode {
 }
 
 /// Configures the intensity of the reasoning/thinking process for models that support it.
+///
+/// The wire spelling is per-variant, not `rename_all = "lowercase"`: that would
+/// emit `extrahigh` for [`ExtraHigh`](Self::ExtraHigh), which the harness does
+/// not recognise.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     /// Minimal reasoning overhead.
+    #[serde(rename = "minimal")]
     Minimal,
     /// Low reasoning.
+    #[serde(rename = "low")]
     Low,
     /// Medium reasoning.
+    #[serde(rename = "medium")]
     Medium,
     /// High reasoning.
+    #[serde(rename = "high")]
     High,
+    /// The highest reasoning budget (added upstream in 0.1.7).
+    #[serde(rename = "extra_high")]
+    ExtraHigh,
+}
+
+impl ThinkingLevel {
+    /// The wire spelling the harness expects.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "extra_high",
+        }
+    }
+}
+
+/// What a model is used for.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    /// Text and reasoning.
+    Text,
+    /// Image generation.
+    Image,
+}
+
+impl ModelType {
+    /// The proto enum value (`ModelType`).
+    #[must_use]
+    pub const fn as_proto(self) -> i32 {
+        match self {
+            Self::Text => 1,
+            Self::Image => 2,
+        }
+    }
+}
+
+/// Per-model generation options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GeminiModelOptions {
+    /// Reasoning budget for models that support it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
+impl GeminiModelOptions {
+    /// Whether every option is unset.
+    ///
+    /// Upstream omits the `options` sub-message entirely in that case rather
+    /// than sending an empty object (`local_connection.py:140-146`).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.thinking_level.is_none()
+    }
+}
+
+/// Where a model is served from.
+///
+/// Mirrors upstream's `ModelEndpoint` hierarchy (`models.py:73-128`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEndpoint {
+    /// The Gemini Developer API.
+    GeminiApi {
+        /// Overrides the default endpoint host.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        /// Extra headers to send with every request.
+        #[serde(default)]
+        http_headers: std::collections::HashMap<String, String>,
+        /// An explicit key.
+        ///
+        /// Leave unset to let the harness read `GEMINI_API_KEY` from the
+        /// environment it inherits — that is what upstream does, and it keeps
+        /// the key out of the config frame.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+        /// Generation options.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        options: Option<GeminiModelOptions>,
+    },
+    /// Vertex AI.
+    Vertex {
+        /// Overrides the default endpoint host.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        /// Extra headers to send with every request.
+        #[serde(default)]
+        http_headers: std::collections::HashMap<String, String>,
+        /// GCP project.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// GCP location.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        location: Option<String>,
+        /// Generation options.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        options: Option<GeminiModelOptions>,
+    },
+    /// An OpenAI-compatible backend (Ollama, LM Studio).
+    Gemma {
+        /// The backend's base URL.
+        base_url: String,
+    },
+}
+
+/// One model the agent may use, and where it is served from.
+///
+/// Mirrors upstream's `ModelTarget` (`models.py:131-138`). `name` is optional
+/// and an empty name is meaningful, not an error: the backend then chooses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelTarget {
+    /// The model identifier, or `None` to let the backend choose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What this model is used for. Defaults to text.
+    #[serde(default = "default_model_types")]
+    pub types: Vec<ModelType>,
+    /// Where it is served from.
+    ///
+    /// Required on an explicitly-supplied target: the shorthand endpoint built
+    /// from `api_key`/`vertex` attaches to the shorthand and default models
+    /// only, never to an explicit one (`local_connection.py:1060-1073`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<ModelEndpoint>,
+}
+
+fn default_model_types() -> Vec<ModelType> {
+    vec![ModelType::Text]
+}
+
+impl Default for ModelTarget {
+    fn default() -> Self {
+        Self {
+            name: None,
+            types: default_model_types(),
+            endpoint: None,
+        }
+    }
 }
 
 /// Generation configuration parameters.
@@ -141,9 +290,17 @@ pub struct GeminiConfig {
     /// GCP Location/Region for Vertex AI (e.g., "us-central1").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
-    /// Model configurations.
+    /// Model configurations, in the crate's shorthand form.
     #[serde(default)]
     pub models: ModelConfig,
+    /// Explicit model targets, upstream's `models` list.
+    ///
+    /// Named `model_targets` because `models` is already taken by the
+    /// shorthand above. Entries here come first on the wire; the shorthand and
+    /// the defaults are appended only for model types these do not already
+    /// cover (`local_connection_config.py:268-296`).
+    #[serde(default)]
+    pub model_targets: Vec<ModelTarget>,
     /// Option to enable Google Search grounding tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_google_search: Option<bool>,

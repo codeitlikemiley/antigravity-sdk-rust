@@ -302,7 +302,7 @@ impl WasmConnectionStrategy {
             models: crate::harness_config::build_models_proto(
                 &self.gemini_config,
                 self.capabilities_config.image_model.as_deref(),
-            ),
+            )?,
             system_instructions: proto_sys,
             tools: proto_tools,
             harness_side_tools: Some(side_tools),

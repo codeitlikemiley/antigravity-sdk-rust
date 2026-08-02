@@ -198,7 +198,7 @@ impl Agent<Unstarted> {
     /// - Write tools are enabled but no safety policies are configured.
     /// - The WebSocket upgrade or subprocess connection fails.
     #[allow(clippy::too_many_lines)]
-    pub fn start(self) -> BoxFuture<'static, Result<Agent<Started>, anyhow::Error>> {
+    pub fn start(mut self) -> BoxFuture<'static, Result<Agent<Started>, anyhow::Error>> {
         Box::pin(async move {
             // 1. Resolve binary path
             #[cfg(not(target_arch = "wasm32"))]
@@ -320,6 +320,13 @@ impl Agent<Unstarted> {
                     Some(&self.config.mcp_servers),
                 )?);
                 self.hook_runner.register(enforcer).await;
+            }
+
+            // The environment can select the Vertex backend, which upstream
+            // honours and this crate ignored — a caller whose environment said
+            // Vertex silently got the Gemini API (C3).
+            if !self.config.gemini_config.vertex && crate::harness_config::vertex_from_env() {
+                self.config.gemini_config.vertex = true;
             }
 
             // 5. Register configured tools

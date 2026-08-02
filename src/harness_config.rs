@@ -6,42 +6,38 @@
 
 /// Builds `HarnessConfig.models` (field 15) from the crate's `GeminiConfig`.
 ///
-/// Replaces the `gemini_config` oneof that upstream deleted in 0.1.4. Emits two
-/// entries — one TEXT, one IMAGE — which is what upstream produces for a
-/// default configuration (`local_connection_test.py:3523-3532`). The endpoint
-/// sub-message is present even when empty: an env-only setup sends
-/// `"geminiApiEndpoint": {}` and the harness reads `GEMINI_API_KEY` from the
-/// environment it inherits.
+/// Implements upstream's `_merge_models_list`
+/// (`local_connection_config.py:268-296`): explicit `model_targets` first, then
+/// the shorthand model, then the defaults — and a default is appended **only**
+/// if none of its model types is already covered. Deduplication is by
+/// [`ModelType`], never by name: two text models are legal.
 ///
-/// This keeps the crate's existing public `GeminiConfig` shape. Replacing it
-/// with upstream's `ModelTarget` / `ModelEndpoint` graph is WP-4 proper; this
-/// gets the *wire* right without a public API break.
+/// The shorthand endpoint (Vertex when `vertex` is set, otherwise the Gemini
+/// API) attaches to the shorthand model and to the defaults, never to an
+/// explicit target — an explicit target must carry its own.
+///
+/// # Errors
+///
+/// Returns an error if an explicit target has no endpoint.
 pub fn build_models_proto(
     gemini_config: &crate::types::GeminiConfig,
     image_model: Option<&str>,
-) -> Vec<crate::proto::localharness::ModelConfig> {
-    use crate::proto::localharness::{
-        GeminiApiEndpoint, GeminiModelOptions, ModelConfig as ProtoModelConfig, ModelType,
-        VertexEndpoint, model_config::Endpoint,
-    };
+) -> Result<Vec<crate::proto::localharness::ModelConfig>, anyhow::Error> {
+    use crate::types::{GeminiModelOptions, ModelEndpoint, ModelTarget, ModelType};
 
-    let thinking_level = gemini_config
+    let options = gemini_config
         .models
         .default
         .generation
         .thinking_level
-        .map(|l| match l {
-            crate::types::ThinkingLevel::Minimal => "minimal".to_string(),
-            crate::types::ThinkingLevel::Low => "low".to_string(),
-            crate::types::ThinkingLevel::Medium => "medium".to_string(),
-            crate::types::ThinkingLevel::High => "high".to_string(),
-        });
-    // Upstream omits `options` entirely when every field is None
-    // (local_connection.py:140-146).
-    let options = thinking_level.map(|level| GeminiModelOptions {
-        thinking_level: Some(level),
-    });
+        .map(|thinking_level| GeminiModelOptions {
+            thinking_level: Some(thinking_level),
+        })
+        .filter(|o| !o.is_empty());
 
+    // Never the environment: upstream treats `GEMINI_API_KEY` as a presence
+    // check and lets the harness read it from the environment it inherits, so
+    // the key stays out of the config frame.
     let api_key = gemini_config
         .models
         .default
@@ -49,40 +45,149 @@ pub fn build_models_proto(
         .clone()
         .or_else(|| gemini_config.api_key.clone());
 
-    let endpoint = |options: Option<GeminiModelOptions>| {
+    let shorthand_endpoint = |options: Option<GeminiModelOptions>| {
         if gemini_config.vertex {
-            Endpoint::VertexEndpoint(VertexEndpoint {
+            ModelEndpoint::Vertex {
                 base_url: None,
-                project: gemini_config.project.clone(),
-                location: gemini_config.location.clone(),
-                options,
                 http_headers: std::collections::HashMap::new(),
-            })
+                project: gemini_config
+                    .project
+                    .clone()
+                    .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok()),
+                location: gemini_config
+                    .location
+                    .clone()
+                    .or_else(|| std::env::var("GOOGLE_CLOUD_LOCATION").ok()),
+                options,
+            }
         } else {
-            Endpoint::GeminiApiEndpoint(GeminiApiEndpoint {
+            ModelEndpoint::GeminiApi {
                 base_url: None,
+                http_headers: std::collections::HashMap::new(),
                 api_key: api_key.clone(),
                 options,
-                http_headers: std::collections::HashMap::new(),
-            })
+            }
         }
     };
 
-    vec![
-        ProtoModelConfig {
+    let mut merged: Vec<ModelTarget> = Vec::new();
+    for target in &gemini_config.model_targets {
+        if target.endpoint.is_none() {
+            return Err(anyhow::anyhow!(
+                "the model target `{}` has no endpoint; an explicitly supplied target must carry \
+                 one, because the api_key/vertex shorthand only attaches to the shorthand and \
+                 default models",
+                target.name.as_deref().unwrap_or("<unnamed>")
+            ));
+        }
+        merged.push(target.clone());
+    }
+
+    // The shorthand text model.
+    merged.push(ModelTarget {
+        name: Some(gemini_config.models.default.name.clone()),
+        types: vec![ModelType::Text],
+        endpoint: Some(shorthand_endpoint(options)),
+    });
+
+    // Defaults fill only the types nothing above covers.
+    let image_name = image_model.map_or_else(
+        || gemini_config.models.image_generation.name.clone(),
+        ToString::to_string,
+    );
+    for default in [
+        ModelTarget {
             name: Some(gemini_config.models.default.name.clone()),
-            types: vec![ModelType::Text as i32],
-            endpoint: Some(endpoint(options)),
+            types: vec![ModelType::Text],
+            endpoint: Some(shorthand_endpoint(None)),
         },
-        ProtoModelConfig {
-            name: Some(image_model.map_or_else(
-                || gemini_config.models.image_generation.name.clone(),
-                ToString::to_string,
-            )),
-            types: vec![ModelType::Image as i32],
-            endpoint: Some(endpoint(None)),
+        ModelTarget {
+            name: Some(image_name),
+            types: vec![ModelType::Image],
+            endpoint: Some(shorthand_endpoint(None)),
         },
-    ]
+    ] {
+        let covered: std::collections::HashSet<ModelType> = merged
+            .iter()
+            .flat_map(|t| t.types.iter().copied())
+            .collect();
+        if default.types.iter().any(|t| covered.contains(t)) {
+            continue;
+        }
+        merged.push(default);
+    }
+
+    Ok(merged.iter().map(to_proto).collect())
+}
+
+/// Maps one [`ModelTarget`](crate::types::ModelTarget) onto its proto form.
+fn to_proto(target: &crate::types::ModelTarget) -> crate::proto::localharness::ModelConfig {
+    use crate::proto::localharness::{
+        GeminiApiEndpoint, GeminiModelOptions as ProtoOptions, GemmaEndpoint,
+        ModelConfig as ProtoModelConfig, VertexEndpoint, model_config::Endpoint,
+    };
+    use crate::types::ModelEndpoint;
+
+    let proto_options = |options: &Option<crate::types::GeminiModelOptions>| {
+        options
+            .as_ref()
+            .filter(|o| !o.is_empty())
+            .map(|o| ProtoOptions {
+                thinking_level: o.thinking_level.map(|l| l.as_str().to_string()),
+            })
+    };
+
+    let endpoint = target.endpoint.as_ref().map(|endpoint| match endpoint {
+        ModelEndpoint::GeminiApi {
+            base_url,
+            http_headers,
+            api_key,
+            options,
+        } => Endpoint::GeminiApiEndpoint(GeminiApiEndpoint {
+            base_url: base_url.clone(),
+            http_headers: http_headers.clone(),
+            api_key: api_key.clone(),
+            options: proto_options(options),
+        }),
+        ModelEndpoint::Vertex {
+            base_url,
+            http_headers,
+            project,
+            location,
+            options,
+        } => Endpoint::VertexEndpoint(VertexEndpoint {
+            base_url: base_url.clone(),
+            http_headers: http_headers.clone(),
+            project: project.clone(),
+            location: location.clone(),
+            options: proto_options(options),
+        }),
+        ModelEndpoint::Gemma { base_url } => Endpoint::GemmaEndpoint(GemmaEndpoint {
+            base_url: Some(base_url.clone()),
+        }),
+    });
+
+    ProtoModelConfig {
+        name: Some(target.name.clone().unwrap_or_default()),
+        types: target.types.iter().map(|t| t.as_proto()).collect(),
+        endpoint,
+    }
+}
+
+/// Whether the environment asks for the Vertex backend.
+///
+/// Upstream reads both names and accepts `"true"` or `"1"`
+/// (`local_connection_config.py:206-211`, 0.1.7). This crate read neither, so a
+/// caller whose environment selected Vertex silently got the Gemini API.
+#[must_use]
+pub fn vertex_from_env() -> bool {
+    ["GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "true" || value == "1"
+        })
 }
 
 /// A best-effort OS version string for `ClientInfo.os_version` (proto field 5).
@@ -142,5 +247,154 @@ mod tests {
     fn sanitize_prompt_leaves_ordinary_text_alone() {
         let text = "Hello — こんにちは 🌍";
         assert_eq!(sanitize_prompt(text), text);
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::build_models_proto;
+    use crate::proto::localharness::model_config::Endpoint;
+    use crate::types::{
+        GeminiConfig, GenerationConfig, ModelEndpoint, ModelTarget, ModelType, ThinkingLevel,
+    };
+
+    fn types_of(config: &crate::proto::localharness::ModelConfig) -> Vec<i32> {
+        config.types.clone()
+    }
+
+    #[test]
+    fn a_default_config_emits_one_text_and_one_image_model() {
+        let models = build_models_proto(&GeminiConfig::default(), None).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(types_of(&models[0]), vec![ModelType::Text.as_proto()]);
+        assert_eq!(types_of(&models[1]), vec![ModelType::Image.as_proto()]);
+        // The endpoint is present but empty: the harness reads GEMINI_API_KEY
+        // from the environment it inherits.
+        match models[0].endpoint.as_ref().unwrap() {
+            Endpoint::GeminiApiEndpoint(e) => assert!(e.api_key.is_none()),
+            other => panic!("unexpected endpoint {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_key_reaches_both_entries() {
+        let config = GeminiConfig {
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        };
+        let models = build_models_proto(&config, None).unwrap();
+        for model in &models {
+            match model.endpoint.as_ref().unwrap() {
+                Endpoint::GeminiApiEndpoint(e) => {
+                    // Only the text model carries the shorthand's options; the
+                    // key is on both.
+                    assert_eq!(e.api_key.as_deref(), Some("k"));
+                }
+                other => panic!("unexpected endpoint {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_selects_the_vertex_endpoint() {
+        let config = GeminiConfig {
+            vertex: true,
+            project: Some("p".to_string()),
+            location: Some("l".to_string()),
+            ..Default::default()
+        };
+        let models = build_models_proto(&config, None).unwrap();
+        match models[0].endpoint.as_ref().unwrap() {
+            Endpoint::VertexEndpoint(e) => {
+                assert_eq!(e.project.as_deref(), Some("p"));
+                assert_eq!(e.location.as_deref(), Some("l"));
+            }
+            other => panic!("unexpected endpoint {other:?}"),
+        }
+    }
+
+    /// `options` is omitted entirely when every field is unset, and carries the
+    /// per-variant spelling — `extra_high`, not `extrahigh`.
+    #[test]
+    fn thinking_level_rides_on_options() {
+        let mut config = GeminiConfig::default();
+        config.models.default.generation = GenerationConfig {
+            thinking_level: Some(ThinkingLevel::ExtraHigh),
+        };
+        let models = build_models_proto(&config, None).unwrap();
+        match models[0].endpoint.as_ref().unwrap() {
+            Endpoint::GeminiApiEndpoint(e) => assert_eq!(
+                e.options.as_ref().unwrap().thinking_level.as_deref(),
+                Some("extra_high")
+            ),
+            other => panic!("unexpected endpoint {other:?}"),
+        }
+        // The image entry has no options at all.
+        match models[1].endpoint.as_ref().unwrap() {
+            Endpoint::GeminiApiEndpoint(e) => assert!(e.options.is_none()),
+            other => panic!("unexpected endpoint {other:?}"),
+        }
+    }
+
+    /// An explicit IMAGE target suppresses the default image model, and the
+    /// text default is appended after it.
+    #[test]
+    fn an_explicit_target_covers_its_type() {
+        let config = GeminiConfig {
+            model_targets: vec![ModelTarget {
+                name: Some("my-image-model".to_string()),
+                types: vec![ModelType::Image],
+                endpoint: Some(ModelEndpoint::Gemma {
+                    base_url: "http://localhost:11434".to_string(),
+                }),
+            }],
+            ..Default::default()
+        };
+        let models = build_models_proto(&config, None).unwrap();
+        assert_eq!(models.len(), 2, "no default image model is appended");
+        assert_eq!(models[0].name.as_deref(), Some("my-image-model"));
+        assert_eq!(types_of(&models[1]), vec![ModelType::Text.as_proto()]);
+        assert!(matches!(
+            models[0].endpoint.as_ref().unwrap(),
+            Endpoint::GemmaEndpoint(_)
+        ));
+    }
+
+    /// Dedupe is by model type, never by name: two text models are legal.
+    #[test]
+    fn two_text_models_are_legal() {
+        let config = GeminiConfig {
+            model_targets: vec![ModelTarget {
+                name: Some("gemini-3.6-flash".to_string()),
+                types: vec![ModelType::Text],
+                endpoint: Some(ModelEndpoint::GeminiApi {
+                    base_url: None,
+                    http_headers: std::collections::HashMap::new(),
+                    api_key: None,
+                    options: None,
+                }),
+            }],
+            ..Default::default()
+        };
+        let models = build_models_proto(&config, None).unwrap();
+        let text_models = models
+            .iter()
+            .filter(|m| m.types.contains(&ModelType::Text.as_proto()))
+            .count();
+        assert_eq!(text_models, 2, "the shorthand text model is kept too");
+    }
+
+    #[test]
+    fn an_explicit_target_without_an_endpoint_is_an_error() {
+        let config = GeminiConfig {
+            model_targets: vec![ModelTarget {
+                name: Some("orphan".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = build_models_proto(&config, None).expect_err("an endpoint is required");
+        assert!(err.to_string().contains("no endpoint"), "{err}");
     }
 }

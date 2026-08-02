@@ -180,9 +180,9 @@ break on its first run.
 
 | # | Batch | Items | Size |
 |---|---|---|---|
-| C1 | Model types | `ModelTarget` / `ModelEndpoint` / `GeminiModelOptions`, `ThinkingLevel::ExtraHigh` | M |
-| C2 | Model resolution | The explicit → shorthand → default merge algorithm; per-target endpoint validation | M |
-| C3 | Model environment | `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT` / `_LOCATION`; stop copying the API key onto the wire | S |
+| ~~C1~~ | Model types — **done**. `ThinkingLevel` uses per-variant renames: `rename_all = "lowercase"` would have emitted `extrahigh` | `ModelTarget` / `ModelEndpoint` / `GeminiModelOptions`, `ThinkingLevel::ExtraHigh` | M |
+| ~~C2~~ | Model resolution — **done**. Explicit → shorthand → defaults, deduped by model type and never by name; an explicit target without an endpoint is an error | M |
+| ~~C3~~ | Model environment — **done**. `GOOGLE_GENAI_USE_VERTEXAI`/`_USE_ENTERPRISE` select Vertex, `GOOGLE_CLOUD_PROJECT`/`_LOCATION` hydrate it, and an env-only key stays off the wire | S |
 | C4 | MCP on the wire | `McpServerConfig` proto + `mcp_servers` field 14; stdio `env`, `timeout_seconds` | M |
 | C5 | Retry + truncation | `RetryConfig`, `ToolOutputTruncation` | S |
 | C6 | New built-ins | `search_web`, `read_url_content` configs and their step actions | M |
