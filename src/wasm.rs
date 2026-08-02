@@ -345,13 +345,17 @@ impl WasmConnectionStrategy {
         });
 
         // Setup channels for step stream
-        let (step_tx, step_rx) = mpsc::unbounded_channel::<Result<Step, anyhow::Error>>();
+        let (step_tx, step_rx) = mpsc::unbounded_channel::<crate::step_extract::StepEvent>();
         let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
-        // NOTE: upstream starts idle, but this cannot flip to `true` until
-        // receive_steps() stops treating "idle and queue empty" on its first
-        // poll as end-of-stream — the stream would terminate before any step
-        // arrives. Blocked on C3, which is part of WP-5.
+        // NOTE: upstream starts idle here, and the loop restructure in
+        // receive_steps() removed the first-poll hazard that previously blocked
+        // this. It still cannot flip, for a second reason: a caller that polls
+        // receive_steps() on a fresh connection — before the reader has seen the
+        // harness's STATE_RUNNING — would race, see idle with an empty queue,
+        // and get an empty stream. Upstream's API is send()-then-receive, which
+        // hides this; ours does not promise that yet. Flipping it needs the
+        // connect-time race closed first (see C2 in docs/remaining-work.md).
         let is_idle = Arc::new(AtomicBool::new(false));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
@@ -517,7 +521,7 @@ impl WasmConnectionStrategy {
                                                 http_code,
                                             };
 
-                                            let _ = step_tx.send(Ok(step));
+                                            let _ = step_tx.send(crate::step_extract::StepEvent::Step(Box::new(step)));
 
                                             // Detect platform-level errors (source=SYSTEM) and propagate them.
                                             if source == StepSource::System
@@ -525,7 +529,7 @@ impl WasmConnectionStrategy {
                                                 && (http_code == 400 || http_code == 401 || http_code == 403)
                                             {
                                                 let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
-                                                let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
                                                 break;
                                             }
 
@@ -533,7 +537,7 @@ impl WasmConnectionStrategy {
                                             if status == StepStatus::TerminalError {
                                                 let err_msg = step_update.error_message.clone()
                                                     .unwrap_or_else(|| "Terminal error occurred during execution".to_string());
-                                                let _ = step_tx.send(Err(
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Error(
                                                     AntigravityExecutionError { message: err_msg }.into()
                                                 ));
                                                 break;
@@ -691,11 +695,7 @@ impl WasmConnectionStrategy {
                                             if tsu.state == Some(2) { // STATE_FULLY_IDLE
                                                 conn_is_idle.store(true, Ordering::SeqCst);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
-                                                let sentinel = Step {
-                                                    id: crate::step_extract::IDLE_SENTINEL_ID.to_string(),
-                                                    ..Default::default()
-                                                };
-                                                let _ = step_tx.send(Ok(sentinel));
+                                                let _ = step_tx.send(crate::step_extract::StepEvent::Idle);
                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::InitializeConversationResponse(resp) => {
@@ -758,7 +758,7 @@ impl WasmConnectionStrategy {
                                                     trajectory_id: traj_id.clone(),
                                                     ..Default::default()
                                                 };
-                                                let _ = step_tx_clone.send(Ok(active_step));
+                                                let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(active_step)));
 
                                                 let allow = if let Some(runner) = hook_runner.as_ref() {
                                                     let res = runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow);
@@ -783,7 +783,7 @@ impl WasmConnectionStrategy {
                                                         trajectory_id: traj_id,
                                                         ..Default::default()
                                                     };
-                                                    let _ = step_tx_clone.send(Ok(denied_step));
+                                                    let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(denied_step)));
 
                                                     let resp = ToolResponse {
                                                         id: tool_call.id.clone(),
@@ -853,7 +853,7 @@ impl WasmConnectionStrategy {
                                                     trajectory_id: traj_id,
                                                     ..Default::default()
                                                 };
-                                                let _ = step_tx_clone.send(Ok(done_step));
+                                                let _ = step_tx_clone.send(crate::step_extract::StepEvent::Step(Box::new(done_step)));
 
                                                 // Wrap non-object values under "result"
                                                 let resp_json = if let Some(ref val) = result.result {
@@ -903,7 +903,9 @@ impl WasmConnectionStrategy {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
                     Err(e) => {
-                        let _ = step_tx.send(Err(anyhow!("WS read error: {e:?}")));
+                        let _ = step_tx.send(crate::step_extract::StepEvent::Error(anyhow!(
+                            "WS read error: {e:?}"
+                        )));
                         break;
                     }
                 }
@@ -935,7 +937,7 @@ pub struct WasmConnection {
     conversation_id: String,
     learned_id: Arc<std::sync::OnceLock<String>>,
     is_idle: Arc<AtomicBool>,
-    step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<Step, anyhow::Error>>>>>,
+    step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<crate::step_extract::StepEvent>>>>,
     ws_tx: mpsc::UnboundedSender<String>,
     tool_runner: Option<ToolRunner>,
     hook_runner: Option<HookRunner>,
@@ -984,8 +986,13 @@ impl Connection for WasmConnection {
                         // Falls through to re-evaluate the head condition
                         // rather than ending the stream: more steps may already
                         // be queued behind the idle marker.
-                        Some(Ok(step)) if step.id == crate::step_extract::IDLE_SENTINEL_ID => {}
-                        Some(other) => return Some((other, ())),
+                        Some(crate::step_extract::StepEvent::Idle) => {}
+                        Some(crate::step_extract::StepEvent::Step(step)) => {
+                            return Some((Ok(*step), ()));
+                        }
+                        Some(crate::step_extract::StepEvent::Error(e)) => {
+                            return Some((Err(e), ()));
+                        }
                     }
                 }
             }

@@ -5,13 +5,24 @@
 //! `RUN_COMMAND`'s `combined_output`/`exit_code` — so it lives here instead,
 //! where a wire fix lands once.
 
-/// Id of the synthetic step that marks an idle transition on the step channel.
+/// What the reader task puts on the step channel.
 ///
-/// A sentinel value on the same channel as real steps is upstream's design
-/// (`IDLE_SENTINEL`), but keying it on the id means a harness step with this
-/// literal id would be swallowed. Replacing the channel payload with an enum is
-/// the durable fix and is tracked as the remainder of batch A2.
-pub const IDLE_SENTINEL_ID: &str = "IDLE_SENTINEL";
+/// Upstream signals idle with a sentinel object on the same queue
+/// (`event_processor.IDLE_SENTINEL`). This crate previously used a `Step` whose
+/// `id` was the literal `"IDLE_SENTINEL"`, which meant a harness step carrying
+/// that id would have been silently swallowed. Making the marker a variant
+/// removes the collision by construction.
+#[derive(Debug)]
+pub enum StepEvent {
+    /// A real step. Boxed: `Step` is large and would otherwise set the size of
+    /// every value on the channel.
+    Step(Box<crate::types::Step>),
+    /// A failure to surface to the caller.
+    Error(anyhow::Error),
+    /// The trajectory reached idle. Not an end-of-stream signal on its own —
+    /// steps may already be queued behind it.
+    Idle,
+}
 
 use crate::proto::localharness::StepUpdate;
 use crate::types::ToolCall;
