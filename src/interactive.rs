@@ -80,8 +80,9 @@ fn print_response(response: &ChatResponse) {
         println!("\n{}", response.text);
     }
     // Print usage stats
-    let usage = &response.usage_metadata;
-    if usage.total_token_count > 0 {
+    if let Some(usage) = response.usage_metadata.as_ref()
+        && usage.total_token_count > 0
+    {
         println!(
             "\n📊 Tokens: {} prompt, {} response, {} total",
             usage.prompt_token_count, usage.candidates_token_count, usage.total_token_count

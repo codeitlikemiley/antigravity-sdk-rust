@@ -823,7 +823,7 @@ mod tests {
             text: "hello".to_string(),
             thinking: String::new(),
             steps: vec![],
-            usage_metadata: UsageMetadata::default(),
+            usage_metadata: Some(UsageMetadata::default()),
         };
         runner.dispatch_post_turn(&response).await.unwrap();
 

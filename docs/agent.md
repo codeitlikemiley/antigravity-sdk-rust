@@ -264,7 +264,7 @@ use antigravity_sdk_rust::types::ChatResponse;
 //     text: String,              // Combined model text output
 //     thinking: String,          // Combined reasoning/thinking text
 //     steps: Vec<Step>,          // All intermediate execution steps
-//     usage_metadata: UsageMetadata, // Token consumption stats
+//     usage_metadata: Option<UsageMetadata>, // This turn's token consumption
 // }
 ```
 
@@ -378,7 +378,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let response = agent.chat("Explain Rust's ownership model in 3 sentences.").await?;
     println!("{}", response.text);
-    println!("Tokens used: {}", response.usage_metadata.total_token_count);
+    if let Some(usage) = &response.usage_metadata {
+    println!("Tokens used: {}", usage.total_token_count);
+}
 
     agent.stop().await?;
     Ok(())
@@ -440,7 +442,8 @@ impl Hook for AuditHook {
     }
 
     async fn post_turn(&self, response: &ChatResponse) -> Result<(), anyhow::Error> {
-        println!("[AUDIT] Turn complete. Tokens: {}", response.usage_metadata.total_token_count);
+        let tokens = response.usage_metadata.as_ref().map_or(0, |u| u.total_token_count);
+        println!("[AUDIT] Turn complete. Tokens: {tokens}");
         Ok(())
     }
 }

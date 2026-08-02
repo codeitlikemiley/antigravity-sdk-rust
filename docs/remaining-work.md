@@ -83,18 +83,18 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | T6 | `ToolCall.server_name`; `ToolResult.{server_name, exception}` | S |
 | H11 | `ToolExecutionError{message, tool_name, server_name, source}` | XS |
 | tool-wire | New ungated module both transports delegate to | S |
-| T5 | Absent/empty `arguments_json` → `{}` | XS |
+| ~~T5~~ | **Done** — absent or empty `arguments_json` is an empty object, not null | XS |
 | W8 | Route all six `ToolResponse` constructions through one function | S |
 | docs-on-tool-error | Rewrite the six documents that teach the removed behaviour | S |
 | H1b | Dispatch `post_turn`; parameter → `&str` | S |
 | H1d+H16 | Dispatch `on_compaction`; parameter → `&Step` | XS |
-| A2 | `ChatResponse.usage_metadata` → per-turn, `Option<UsageMetadata>` | XS |
+| ~~A2~~ | **Done** — per-turn and `Option`; the session total stays on `Conversation::total_usage` | XS |
 | T7+T8 | Reject duplicate tool names; insertion-ordered registry | S |
 | T4 | Coerce model-supplied arguments against the tool's JSON Schema | M |
 | T10 | Execute a tool-call batch concurrently | S |
 | X19 | Exercise context-aware tools in an example and tests | S |
 | A11 | `every()` invokes a callback and rejects a non-positive interval | S |
-| finish-extractor | Map `StepUpdate.finish` to a `FINISH` `ToolCall` so it is policy-evaluated | XS |
+| ~~finish-extractor~~ | **Done** — `FINISH` classifies as a tool call, so the one call that ends a turn is finally visible to policies and hooks | XS |
 
 ---
 
@@ -201,7 +201,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | D4 | Tool runner | T7+T8, T4, T10, `finish-extractor` | M |
 | D5 | `ToolContext` | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | D6 | Triggers | A10, A1, A11 | M |
-| D7 | Per-turn response | A2, `chatresponse-per-turn-steps` | XS |
+| ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
 | D8 | Remaining hook signatures | H1b, H1d+H16 | S |
 
 > **Before D8, settle the `HookContext` question.** The maintainer chose to ship

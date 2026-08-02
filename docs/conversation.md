@@ -104,7 +104,10 @@ let response = conversation.chat_to_completion("What is 2 + 2?").await?;
 println!("Response: {}", response.text);
 println!("Thinking: {}", response.thinking);
 println!("Steps: {}", response.steps.len());
-println!("Total tokens: {}", response.usage_metadata.total_token_count);
+// This turn only; `conversation.total_usage()` is the session total.
+if let Some(usage) = &response.usage_metadata {
+    println!("Turn tokens: {}", usage.total_token_count);
+}
 ```
 
 **Signature:**
@@ -330,7 +333,7 @@ pub struct ChatResponse {
     /// All steps executed during this turn.
     pub steps: Vec<Step>,
     /// Cumulative token usage metrics.
-    pub usage_metadata: UsageMetadata,
+    pub usage_metadata: Option<UsageMetadata>,
 }
 ```
 

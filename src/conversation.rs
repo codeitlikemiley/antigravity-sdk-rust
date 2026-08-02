@@ -345,7 +345,7 @@ impl Conversation {
                 .map(<[Step]>::to_vec)
                 .unwrap_or_default()
         };
-        let usage_metadata = self.total_usage().await;
+        let usage_metadata = self.last_turn_usage().await;
         Ok(ChatResponse {
             text,
             thinking,

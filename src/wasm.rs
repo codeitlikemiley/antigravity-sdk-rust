@@ -863,7 +863,13 @@ impl WasmConnectionStrategy {
                                             let learned_id_clone = conn_learned_id.clone();
                                             let counter = client_tool_step_counter.clone();
                                             crate::spawn_task(async move {
-                                                let args: Value = serde_json::from_str(&tool_call.arguments_json.clone().unwrap_or_default()).unwrap_or(Value::Null);
+                                                // An absent or empty arguments_json is an empty argument object, not
+                                                // null: upstream does `json.loads(arguments_json or "{}")`.
+                                                // A tool reading `args["x"]` got a type error instead of a
+                                                // missing key.
+                                                let raw_args = tool_call.arguments_json.clone().unwrap_or_default();
+                                                let raw_args = if raw_args.trim().is_empty() { "{}".to_string() } else { raw_args };
+                                                let args: Value = serde_json::from_str(&raw_args).unwrap_or(Value::Null);
                                                 let tc = ToolCall {
                                                     id: tool_call.id.clone().unwrap_or_default(),
                                                     name: tool_call.name.clone().unwrap_or_default(),

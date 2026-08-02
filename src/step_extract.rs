@@ -114,6 +114,18 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
                 "directory_path": list.directory_path,
             }),
         )
+    } else if let Some(ref finish) = step_update.finish {
+        // FINISH is a built-in like any other upstream
+        // (`_BUILTIN_TOOL_PROTO_FIELDS`), and leaving it out meant the one call
+        // that ends a turn and emits structured output was never seen by a
+        // policy or a hook. `BuiltinTools::read_only()` already includes it, so
+        // the default policy sets allow it.
+        (
+            "FINISH",
+            serde_json::json!({
+                "output_string": finish.output_string,
+            }),
+        )
     } else {
         // Last arm: a step carrying none of these actions is not a tool call.
         let img_gen = step_update.generate_image.as_ref()?;
@@ -234,5 +246,45 @@ mod consumer_guard_tests {
         // Released on drop — this is what lets `receive_steps()` be called once
         // per turn rather than once per connection.
         assert!(ConsumerGuard::claim(&flag).is_some());
+    }
+}
+
+#[cfg(test)]
+mod extractor_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::extract_builtin_tool_call;
+    use crate::proto::localharness::{ActionFinish, StepUpdate};
+
+    /// FINISH is the call that ends a turn and emits structured output. It was
+    /// the one built-in no policy or hook could see.
+    #[test]
+    fn finish_is_a_tool_call() {
+        let update = StepUpdate {
+            trajectory_id: Some("t".to_string()),
+            step_index: Some(3),
+            finish: Some(ActionFinish {
+                output_string: Some("{\"answer\":42}".to_string()),
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&update).expect("FINISH should classify as a tool call");
+        assert_eq!(tc.name, "FINISH");
+        assert_eq!(
+            tc.args.get("output_string").and_then(|v| v.as_str()),
+            Some("{\"answer\":42}")
+        );
+        // Nothing path-shaped, so nothing to scope.
+        assert!(tc.canonical_path.is_none());
+    }
+
+    #[test]
+    fn a_step_with_no_action_is_not_a_tool_call() {
+        let update = StepUpdate {
+            trajectory_id: Some("t".to_string()),
+            step_index: Some(1),
+            text: Some("just talking".to_string()),
+            ..Default::default()
+        };
+        assert!(extract_builtin_tool_call(&update).is_none());
     }
 }

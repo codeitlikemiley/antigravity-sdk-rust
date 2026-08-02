@@ -701,8 +701,13 @@ pub struct ChatResponse {
     pub thinking: String,
     /// Sequence of intermediate execution steps.
     pub steps: Vec<Step>,
-    /// Token usage metrics.
-    pub usage_metadata: UsageMetadata,
+    /// Token usage for **this turn**, or `None` when the harness reported none.
+    ///
+    /// Was the session's running total, which made it impossible to answer
+    /// "what did this reply cost" — the number a caller reaches for. The
+    /// cumulative figure is still available as
+    /// [`Conversation::total_usage`](crate::conversation::Conversation::total_usage).
+    pub usage_metadata: Option<UsageMetadata>,
 }
 
 /// Streaming fragment sent over chunk-based event listeners.
