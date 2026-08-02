@@ -52,10 +52,9 @@ Twelve items, none blocking each other except where noted.
 
 | ID | What | Files | Size |
 |---|---|---|---|
-| S13 | `policy::safe_defaults(handler)` | `policy.rs` | XS |
 | S15 | MCP builder `when`/`name` options; `allow_` → `approve_` auto-name | `policy.rs` | XS |
 | N8 | `IntoPolicies` so policy groups compose in the builder | `policy.rs`, `agent.rs` | XS |
-| C2 | A freshly connected connection reports `is_idle == true` | `local.rs`, `wasm.rs` | XS |
+| C2 | A freshly connected connection reports `is_idle == true`. **Blocked on C3** (WP-5): flipping it alone makes `receive_steps()` end the stream on its first poll — tried, reverted, `NOTE` left at both sites | `local.rs`, `wasm.rs` | XS |
 | A5 | `Conversation::send` drains the previous turn into history | `conversation.rs`, `connection.rs` | M |
 | H9 | Contain an erroring `on_tool_error` hook instead of aborting the chain | `hooks.rs` | XS |
 | H1c | Dispatch `session_end` from `disconnect()` | `local.rs`, `wasm.rs` | XS |

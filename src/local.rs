@@ -804,6 +804,10 @@ impl LocalConnectionStrategy {
         let (step_tx, step_rx) = mpsc::unbounded_channel::<Result<Step, anyhow::Error>>();
         let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
+        // NOTE: upstream starts idle, but this cannot flip to `true` until
+        // receive_steps() stops treating "idle and queue empty" on its first
+        // poll as end-of-stream — the stream would terminate before any step
+        // arrives. Blocked on C3, which is part of WP-5.
         let is_idle = Arc::new(AtomicBool::new(false));
         let parent_idle = Arc::new(Mutex::new(false));
         let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));

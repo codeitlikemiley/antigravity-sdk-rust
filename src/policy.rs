@@ -161,6 +161,21 @@ pub fn confirm_run_command(
     )
 }
 
+/// Creates a safe default policy set: every read-only tool is approved, and
+/// anything else asks the user.
+///
+/// Mirrors upstream `safe_defaults()` (`policy.py:371-384` at 0.1.1). Note the
+/// ordering — the specific APPROVE rules sit in a higher-priority bucket than
+/// the trailing wildcard `ASK_USER`, so a read-only tool is never prompted for.
+pub fn safe_defaults(handler: impl Fn(&ToolCall) -> bool + Send + Sync + 'static) -> Vec<Policy> {
+    let mut policies: Vec<Policy> = crate::types::BuiltinTools::read_only()
+        .iter()
+        .map(|tool| allow(tool.as_str()))
+        .collect();
+    policies.push(ask_user("*", handler));
+    policies
+}
+
 /// Creates a set of policies restricting file system tools to the given
 /// workspace directories.
 ///
