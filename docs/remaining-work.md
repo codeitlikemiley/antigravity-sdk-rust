@@ -206,11 +206,10 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
 | ~~D8~~ | Remaining hook signatures — **done** | H1b, H1d+H16 | S |
 
-> **Before D8, settle the `HookContext` question.** The maintainer chose to ship
-> the `Hook` break now and accept a second one later (§8.3), so D8's release
-> notes must **not** claim the trait is settled — they must say a further break
-> is expected. Pulling `HookContext`'s signature half into D8 would avoid that
-> second break; that remains an open option.
+> **The `HookContext` question was settled by E3, not deferred.** The plan here
+> was to ship D8's break and accept a second one later. E3 landed the context
+> parameter in the same release instead, which is the option this note called
+> preferable: downstream breaks once, and no further `Hook` break is outstanding.
 
 ### Phase E — hooks and the rest — **complete**
 

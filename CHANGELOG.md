@@ -7,8 +7,9 @@ backlog recorded in `docs/upstream-parity.md` and
 `docs/fix-plan-current-defects.md`.
 
 This release **breaks source compatibility**. The breaks are batched here
-deliberately so downstream code adapts once. One further `Hook` break is
-expected — see [Still expected to break](#still-expected-to-break).
+deliberately so downstream code adapts once — including both `Hook` breaks, the
+second of which was pulled forward for exactly that reason. See
+[On the two `Hook` breaks in this release](#on-the-two-hook-breaks-in-this-release).
 
 ### Why the wire changes matter
 
@@ -152,12 +153,19 @@ build failure rather than a silent hang.
 - Tool-call arguments carry arguments, not post-execution results.
 - The removed DuckDuckGo/`python3` scraper.
 
-### Still expected to break
+### On the two `Hook` breaks in this release
 
-The `HookContext` signature question is not settled. Shipping the `Hook` break
-now was a deliberate call, accepting a second break later rather than blocking
-this release on it. Do not read this release as the trait reaching its final
-shape.
+`Hook` is broken **twice** here, deliberately, so that downstream code adapts
+once rather than across two releases:
+
+1. Signatures — `post_turn` takes `&str`, `on_compaction` takes `&Step`,
+   `on_tool_error` returns `Result<Option<String>>`.
+2. A `&HookContext` parameter on all nine methods.
+
+The second was originally planned for a later release, which would have broken
+every implementation a second time. It was pulled forward instead. No further
+`Hook` break is on the roadmap — though this is a pre-1.0 crate and that is not
+a stability guarantee.
 
 ### Out of scope
 
