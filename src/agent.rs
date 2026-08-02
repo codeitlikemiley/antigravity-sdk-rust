@@ -584,6 +584,35 @@ impl<P> AgentBuilder<P> {
         self
     }
 
+    /// Sets the policy set from a mix of groups and individual policies.
+    ///
+    /// The group builders return `Vec<Policy>` and the individual ones return a
+    /// `Policy`, so composing them previously meant assembling the vector by
+    /// hand. Upstream flattens nested sequences for the same reason
+    /// (`connection.py:138-159`).
+    ///
+    /// ```no_run
+    /// use antigravity_sdk_rust::{agent::Agent, policy};
+    ///
+    /// let agent = Agent::builder()
+    ///     .policy_groups([
+    ///         policy::workspace_only(vec!["/srv/app".to_string()]),
+    ///         vec![policy::deny("RUN_COMMAND"), policy::allow_all()],
+    ///     ])
+    ///     .build();
+    /// ```
+    pub fn policy_groups<I, G>(self, groups: I) -> AgentBuilder<HasPolicies>
+    where
+        I: IntoIterator<Item = G>,
+        G: crate::policy::IntoPolicies,
+    {
+        let flattened: Vec<Policy> = groups
+            .into_iter()
+            .flat_map(crate::policy::IntoPolicies::into_policies)
+            .collect();
+        self.policies(flattened)
+    }
+
     pub fn policies(self, policies: Vec<Policy>) -> AgentBuilder<HasPolicies> {
         let mut config = self.config;
         config.policies = Some(policies);

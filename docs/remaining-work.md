@@ -52,7 +52,6 @@ Twelve items, none blocking each other except where noted.
 
 | ID | What | Files | Size |
 |---|---|---|---|
-| N8 | `IntoPolicies` so policy groups compose in the builder | `policy.rs`, `agent.rs` | XS |
 | C2 | A freshly connected connection reports `is_idle == true`. **Blocked on the connect-time race**, not on C3 — the loop restructure removed the first-poll hazard, but a caller polling `receive_steps()` before the reader sees `STATE_RUNNING` still gets an empty stream. Upstream's API is send()-then-receive; ours does not promise that. Tried twice, reverted twice; `NOTE` at both sites | `local.rs`, `wasm.rs` | S |
 | A5 | `Conversation::send` drains the previous turn into history | `conversation.rs`, `connection.rs` | M |
 | H1c | Dispatch `session_end` from `disconnect()` | `local.rs`, `wasm.rs` | XS |

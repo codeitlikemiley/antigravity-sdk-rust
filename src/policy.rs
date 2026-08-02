@@ -80,6 +80,36 @@ impl Policy {
     }
 }
 
+/// Anything that can be flattened into a list of policies.
+///
+/// Upstream accepts nested sequences and flattens them in a validator
+/// (`connection.py:138-159`), which is why every group builder there composes
+/// inline. This crate's group builders return `Vec<Policy>` while the agent
+/// builder took a flat `Vec`, so mixing a group with a scalar meant building
+/// the vector by hand. See [`crate::agent::AgentBuilder::policy_groups`].
+pub trait IntoPolicies {
+    /// Consumes self into a policy list.
+    fn into_policies(self) -> Vec<Policy>;
+}
+
+impl IntoPolicies for Policy {
+    fn into_policies(self) -> Vec<Policy> {
+        vec![self]
+    }
+}
+
+impl IntoPolicies for Vec<Policy> {
+    fn into_policies(self) -> Vec<Policy> {
+        self
+    }
+}
+
+impl<const N: usize> IntoPolicies for [Policy; N] {
+    fn into_policies(self) -> Vec<Policy> {
+        self.into()
+    }
+}
+
 /// Helper constructor to approve a specific tool invocation unconditionally.
 pub fn allow(tool: &str) -> Policy {
     Policy::new(
