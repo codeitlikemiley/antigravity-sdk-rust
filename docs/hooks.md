@@ -301,9 +301,9 @@ Policies are sorted into 9 buckets organized by **specificity** (3 levels) ×
 use antigravity_sdk_rust::policy;
 
 // ── Single-tool policies ───────────────────────────────────────────
-let _ = policy::allow("read_file");           // Approve a specific tool
-let _ = policy::deny("run_command");           // Deny a specific tool
-let _ = policy::ask_user("run_command", |_tc| {
+let _ = policy::allow("VIEW_FILE");            // Approve a specific tool
+let _ = policy::deny("RUN_COMMAND");           // Deny a specific tool
+let _ = policy::ask_user("RUN_COMMAND", |_tc| {
     // Return true = user approved, false = user denied
     true
 });
@@ -354,7 +354,7 @@ Policies can include a predicate that narrows when they apply:
 use antigravity_sdk_rust::policy;
 
 // Only deny run_command when the command contains "rm"
-let _ = policy::deny("run_command").when(|tc| {
+let _ = policy::deny("RUN_COMMAND").when(|tc| {
     tc.args
         .get("CommandLine")
         .and_then(|v| v.as_str())
@@ -372,7 +372,7 @@ use antigravity_sdk_rust::policy;
 // Without MCP servers
 let enforcer = policy::enforce(
     vec![
-        policy::deny("run_command"),
+        policy::deny("RUN_COMMAND"),
         policy::allow_all(),
     ],
     None,  // no MCP servers
