@@ -161,16 +161,25 @@ pub fn confirm_run_command(
     )
 }
 
-/// Creates a set of policies restricting file system tools to specified workspace directory paths.
+/// Creates a set of policies restricting file system tools to the given
+/// workspace directories.
+///
+/// Scopes [`BuiltinTools::path_scoped_tools`], which is a deliberate superset
+/// of upstream's `file_tools()` — see that method for why. For upstream's exact
+/// three-tool scope, call [`workspace_only_for`] with
+/// [`BuiltinTools::file_tools`].
+///
+/// An empty `workspaces` list denies every scoped tool that carries a path,
+/// matching upstream (`policy.py:530`).
 pub fn workspace_only(workspaces: Vec<String>) -> Vec<Policy> {
-    let file_tools = vec![
-        "CREATE_FILE",
-        "EDIT_FILE",
-        "VIEW_FILE",
-        "LIST_DIR",
-        "SEARCH_DIR",
-    ];
+    workspace_only_for(&crate::types::BuiltinTools::path_scoped_tools(), workspaces)
+}
 
+/// [`workspace_only`], restricted to an explicit tool list.
+pub fn workspace_only_for(
+    tools: &[crate::types::BuiltinTools],
+    workspaces: Vec<String>,
+) -> Vec<Policy> {
     let is_outside_workspace = move |tc: &ToolCall| -> bool {
         let path_str = tc.canonical_path.as_deref().unwrap_or("");
         if path_str.is_empty() {
@@ -187,11 +196,11 @@ pub fn workspace_only(workspaces: Vec<String>) -> Vec<Policy> {
 
     let when_fn = Arc::new(is_outside_workspace);
 
-    file_tools
-        .into_iter()
+    tools
+        .iter()
         .map(|tool| {
             Policy::new(
-                tool.to_string(),
+                tool.as_str().to_string(),
                 Decision::Deny,
                 Some(when_fn.clone()),
                 None,

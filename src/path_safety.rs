@@ -187,6 +187,97 @@ pub fn is_path_in_workspace(target: &str, workspace: &str) -> bool {
         .all(|(a, b)| a == b)
 }
 
+/// The user's home directory.
+///
+/// Hand-rolled rather than using `std::env::home_dir` (long deprecated over its
+/// wrong Windows semantics) or pulling in the `dirs` crate.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(Into::into)
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            return Some(profile.into());
+        }
+        let drive = std::env::var_os("HOMEDRIVE")?;
+        let path = std::env::var_os("HOMEPATH")?;
+        let mut combined = drive;
+        combined.push(&path);
+        Some(combined.into())
+    }
+}
+
+/// Expands a leading `~` or `~/`.
+///
+/// `~user/...` needs the passwd database and is reported as an error rather
+/// than being silently treated as a literal directory named `~user`.
+///
+/// # Errors
+///
+/// Returns an error when `~` cannot be expanded because the home directory is
+/// unknown, or when the path uses the unsupported `~user` form.
+pub fn expand_home(path: &str) -> Result<String, anyhow::Error> {
+    if path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\")) {
+        let home = home_dir().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot expand '~' in '{path}': HOME (or USERPROFILE on Windows) is not set. \
+                 Pass an absolute app_data_dir instead."
+            )
+        })?;
+        let rest = path.get(1..).unwrap_or("").trim_start_matches(['/', '\\']);
+        // `join("")` would append a trailing separator; Python's expanduser("~")
+        // returns the home directory unchanged.
+        let expanded = if rest.is_empty() {
+            home
+        } else {
+            home.join(rest)
+        };
+        return Ok(expanded.to_string_lossy().into_owned());
+    }
+    if path.starts_with('~') {
+        return Err(anyhow::anyhow!(
+            "'~user' expansion is not supported: '{path}'"
+        ));
+    }
+    Ok(path.to_string())
+}
+
+/// `~/.gemini/antigravity`, resolved.
+///
+/// Mirrors upstream's `DEFAULT_APP_DATA_DIR`
+/// (`local_connection_config.py:35-37`). There is deliberately no `/tmp`
+/// fallback: granting the agent a workspace root under a world-writable
+/// directory is worse than refusing to start.
+///
+/// # Errors
+///
+/// Returns an error when the home directory cannot be determined.
+pub fn default_app_data_dir() -> Result<PathBuf, anyhow::Error> {
+    app_data_dir_from(home_dir())
+}
+
+/// The testable half of [`default_app_data_dir`] — the environment read is the
+/// only thing left in the wrapper, because `std::env::set_var` is `unsafe` and
+/// this crate forbids `unsafe_code`.
+fn app_data_dir_from(home: Option<PathBuf>) -> Result<PathBuf, anyhow::Error> {
+    let home = home.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot determine the home directory (HOME/USERPROFILE unset); \
+             set app_data_dir explicitly to an absolute path"
+        )
+    })?;
+    let path = home.join(".gemini").join("antigravity");
+    // A directory that does not exist yet still resolves (the tail is lexical);
+    // the only way this errors is a genuinely inaccessible ancestor, where the
+    // unresolved path is a better allow-list entry than aborting startup.
+    Ok(secure_normalize_path(&path.to_string_lossy()).unwrap_or(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +390,55 @@ mod tests {
             return;
         };
         assert_eq!(resolved, Path::new("/"));
+    }
+
+    #[test]
+    fn expand_home_expands_tilde() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+        let Ok(expanded) = expand_home("~/x/y") else {
+            return;
+        };
+        assert_eq!(expanded, home.join("x/y").to_string_lossy());
+        let Ok(bare) = expand_home("~") else {
+            return;
+        };
+        assert_eq!(bare, home.to_string_lossy());
+    }
+
+    #[test]
+    fn expand_home_rejects_tilde_user() {
+        assert!(expand_home("~someone/x").is_err());
+    }
+
+    #[test]
+    fn expand_home_passes_through_other_paths() {
+        assert_eq!(expand_home("/abs/path").ok().as_deref(), Some("/abs/path"));
+        assert_eq!(expand_home("rel/path").ok().as_deref(), Some("rel/path"));
+    }
+
+    /// The security regression: with no home directory the old code fell back
+    /// to `/tmp/.gemini/antigravity` and added it to the workspace allow-list,
+    /// so anyone able to pre-create that path chose a workspace root.
+    #[test]
+    fn app_data_dir_never_falls_back_to_tmp() {
+        let result = app_data_dir_from(None);
+        assert!(
+            result.is_err(),
+            "a missing home directory must be an error, not a /tmp path"
+        );
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(!message.contains("/tmp"), "must not name /tmp: {message}");
+        assert!(message.contains("app_data_dir"));
+    }
+
+    #[test]
+    fn app_data_dir_is_under_home() {
+        let Ok(resolved) = app_data_dir_from(Some(PathBuf::from("/home/someone"))) else {
+            return;
+        };
+        assert!(resolved.ends_with(".gemini/antigravity"), "{resolved:?}");
     }
 
     /// A wire-format URI must resolve like the native path it denotes, not be

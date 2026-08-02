@@ -177,7 +177,13 @@ The SDK provides these built-in tools (managed by the harness):
 
 ### Read-Only Tools
 
-`BuiltinTools::read_only()` returns: `FindFile`, `ListDir`, `SearchDir`, `ViewFile`, `GrepSearch`.
+`BuiltinTools::read_only()` returns: `ListDir`, `SearchDir`, `FindFile`, `ViewFile`, `Finish` —
+matching upstream's `BuiltinTools.read_only()`. `Finish` is included because an agent that
+cannot finish cannot terminate a turn or emit structured output.
+
+Related sets: `BuiltinTools::all_tools()`, `BuiltinTools::file_tools()` (upstream's exact
+three file tools) and `BuiltinTools::path_scoped_tools()` (what `workspace_only` scopes —
+a deliberate superset, see [policy scoping](#workspace-scoping)).
 
 ## Agent Builder Integration
 
@@ -222,12 +228,6 @@ impl Tool for InventoryTool {
     }
 }
 ```
-
-## Google Search Fallback
-
-If the model invokes `google_search` or `web_search` and no custom tool handles it, the SDK runs a built-in DuckDuckGo scraper:
-- **Native**: Spawns `python3` subprocess to scrape results
-- **WASM**: Returns empty result (not available)
 
 ## Python SDK Comparison
 

@@ -6359,7 +6359,20 @@ The three that change what a commit *is*, not merely when it lands:
 - **`process_tool_calls` is one rewrite.** WI-32 (storage type) → WI-22 (`ToolResult` shape) → WI-14 (pure deletions) → then WI-35 + WI-34 + WI-33 as a **single** commit, because `join_all`'s body is the only place the coercion call and the `needs_context()` branch can go. WI-35's quoted code is already stale against the four items that patch the same loop.
 - **WI-27 subsumes WI-15.** Both rewrite `dispatch_on_tool_error` with incompatible signatures. If WI-27 is taken, drop WI-15 and move its two upstream test ports into WI-27's list. If WI-27 is declined (see §8.3), WI-15 becomes the correct minimal fix and its citation needs correcting to `0.1.1 hooks/hook_runner.py:231-243`.
 
-### 8.3 Two decisions this forces
+### 8.3 Decisions taken
+
+Settled by the maintainer on 2026-08-02. These are binding for the
+implementation; the reasoning that produced the options is kept below.
+
+| Decision | Choice | Consequence |
+|---|---|---|
+| **§8.1 `workspace_only` scope (WI-6)** | Keep the five tools scoped today; add `file_tools()` alongside for API parity | The extra strictness over upstream (`LIST_DIR`, `SEARCH_DIR`) is a **named divergence**, recorded in the changelog and in `docs/policy.md`, not presented as parity. `FIND_FILE` stays unscoped, matching upstream. |
+| **Hook signature finality (WI-29)** | Ship WI-29 now and accept a second break later | `HookContext` is **not** declined — it stays on the roadmap. WI-29's release notes must therefore **not** claim the `Hook` trait is settled; they must say a further break is expected if `HookContext` lands. |
+| **Forward-ports** | Wire-neutral upstream API corrections are **in scope** for this release | WI-27 (H4) keeps its full narrowing, the `on_tool_error` docs rewrite, and WI-34 (T4) argument coercion. Batching them with the migration's surface avoids a second breaking release for the same types. |
+| **`google_search` fallback (WI-14/T3)** | Delete outright | Unregistered tools fall through to `Unknown tool: '<name>'`, which is upstream's only behaviour. A documented feature is removed — needs a changelog entry and README/`docs/tools.md` edits in the same commit. |
+
+### 8.3.1 The reasoning behind those two hook/forward-port options
+
 
 1. **Hook signature finality.** WI-29 claims the `&str` `post_turn` signature is the last break to `Hook`. That is untrue if H5 (`HookContext` threading, audit §4.3) is ever adopted — it re-breaks every hook method. Either pull H5's *signature* half into the same commit, passing a `HookContext` whose state store is initially trivial, so downstream implementors break once; or explicitly decline H5 and record it in `docs/upstream-parity.md` §6. Do not ship a finality claim a later release contradicts.
 2. **May this release forward-port?** WI-27 (H4), WI-34 (T4), WI-22's `#[non_exhaustive]` and part of WI-20 are upstream API corrections from 0.1.6–0.1.9 that happen not to touch the wire. Either the release is *defects against the pinned 0.1.1 harness only* — in which case WI-27 shrinks to its genuine today-bugs, the missing `val.is_some()` guard at `src/local.rs:1161-1165` and the `StepStatus` downgrade at `:1170-1176` (a **Rust-only invention**, present in no upstream version) — or it explicitly permits wire-neutral forward-ports. State the rule once, in the audit's §6, and apply it uniformly.

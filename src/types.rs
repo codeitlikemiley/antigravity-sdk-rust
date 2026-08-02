@@ -211,11 +211,71 @@ impl BuiltinTools {
     }
 
     /// Returns a list of all safe, read-only tools.
+    ///
+    /// Mirrors upstream `BuiltinTools.read_only()` (`types.py:249-262` at
+    /// 0.1.1), including `FINISH` — an agent that cannot finish cannot
+    /// terminate a turn or emit structured output. Order matches upstream so
+    /// generated policies line up with `policy_test.py`.
     pub fn read_only() -> Vec<Self> {
         vec![
+            Self::ListDir,
+            Self::SearchDir,
+            Self::FindFile,
+            Self::ViewFile,
+            Self::Finish,
+        ]
+    }
+
+    /// Returns every built-in tool, in wire-config order.
+    ///
+    /// The single source of truth for "all tools"; this list was previously
+    /// hardcoded in four places, which is how `FINISH` went missing from
+    /// [`read_only`](Self::read_only).
+    pub fn all_tools() -> Vec<Self> {
+        vec![
+            Self::CreateFile,
+            Self::EditFile,
             Self::FindFile,
             Self::ListDir,
+            Self::RunCommand,
+            Self::SearchDir,
             Self::ViewFile,
+            Self::StartSubagent,
+            Self::GenerateImage,
+            Self::Finish,
+        ]
+    }
+
+    /// Tools that read, write or create a file.
+    ///
+    /// Exact mirror of upstream `BuiltinTools.file_tools()` (`types.py:294-307`
+    /// at 0.1.1, `:274-287` at 0.1.9), provided for parity when porting a
+    /// Python policy.
+    ///
+    /// Note that [`workspace_only`](crate::policy::workspace_only) deliberately
+    /// scopes a superset — see [`path_scoped_tools`](Self::path_scoped_tools).
+    pub fn file_tools() -> Vec<Self> {
+        vec![Self::ViewFile, Self::CreateFile, Self::EditFile]
+    }
+
+    /// The tools the workspace sandbox scopes.
+    ///
+    /// A **deliberate divergence** from upstream, which scopes only
+    /// [`file_tools`](Self::file_tools): `list_directory` enumerates the
+    /// filesystem and `search_directory` returns matching file *content*, so
+    /// leaving them unscoped would let the model read outside the workspace.
+    /// Diverging stricter is defensible; diverging looser is not.
+    ///
+    /// `FIND_FILE` is left unscoped, matching upstream, even though it carries
+    /// a `directory_path`. To get upstream's exact scope instead, use
+    /// [`workspace_only_for`](crate::policy::workspace_only_for) with
+    /// [`file_tools`](Self::file_tools).
+    pub fn path_scoped_tools() -> Vec<Self> {
+        vec![
+            Self::ViewFile,
+            Self::CreateFile,
+            Self::EditFile,
+            Self::ListDir,
             Self::SearchDir,
         ]
     }

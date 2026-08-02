@@ -2,7 +2,7 @@ use crate::conversation::Conversation;
 use crate::hooks::{DynHook, HookRunner};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::local::LocalConnectionStrategy;
-use crate::policy::{self, Policy, PolicyEnforcer};
+use crate::policy::{self, Policy};
 use crate::tools::{DynTool, ToolRunner};
 use crate::triggers::{DynTrigger, TriggerRunner};
 use crate::types::{
@@ -252,27 +252,43 @@ impl Agent<Unstarted> {
                 policy::confirm_run_command(None)
             });
 
-            // Prepend workspace scoping policies ONLY if the caller has not explicitly opted
-            // into allow_all(). When allow_all() is in the policy set, the intent is to
-            // approve every tool call (typically managed by a ConfirmHook instead). In that
-            // case, prepending workspace_only would silently override the user's approval
-            // because Deny policies have higher bucket priority than wildcard Approve policies.
+            // Workspace scoping is applied unconditionally, matching upstream's
+            // model-validator (local_connection_config.py:130-141 at 0.1.1,
+            // :112-133 at 0.1.9). It used to be skipped whenever the policy set
+            // contained `allow_all()` — which is what the README, the crate docs
+            // and every example recommend — so the default posture was less
+            // sandboxed than upstream's. Upstream documents `allow_all()` as the
+            // way to get autonomous shell access *while* file tools stay scoped;
+            // the opt-out is `workspaces(vec![])`, not a policy name.
             //
-            // We detect allow_all by looking for a wildcard Approve policy named "allow_all".
-            // If found, skip the workspace gate entirely.
-            let has_allow_all = final_policies.iter().any(|p| {
-                p.tool == "*"
-                    && p.decision == crate::policy::Decision::Approve
-                    && p.name == "allow_all"
-            });
+            // Drop any workspace_only policies already present first, so
+            // re-application cannot stack duplicate DENY rules (0.1.9 :114-118).
+            // This runs unconditionally, so `workspaces(vec![])` also strips a
+            // hand-passed workspace_only group — upstream's semantics.
+            final_policies.retain(|p| p.name != "workspace_only");
 
-            if !has_allow_all && !workspaces.is_empty() {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                let app_data_dir = self
-                    .config
-                    .app_data_dir
-                    .clone()
-                    .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
+            if !workspaces.is_empty() {
+                let app_data_dir = match self.config.app_data_dir.clone() {
+                    Some(raw) => {
+                        let expanded = crate::path_safety::expand_home(&raw)?;
+                        if !std::path::Path::new(&expanded).is_absolute() {
+                            // Message copied from upstream
+                            // local_connection_config.py:112.
+                            return Err(anyhow!(
+                                "app_data_dir must be an absolute path, got '{raw}'"
+                            ));
+                        }
+                        crate::path_safety::secure_normalize_path(&expanded)
+                            .map_or(expanded, |p| p.to_string_lossy().into_owned())
+                    }
+                    // No /tmp fallback: granting a workspace root under a
+                    // world-writable directory when HOME is unset is worse than
+                    // refusing to start, and after the path-resolution fix a
+                    // pre-planted symlink there would be followed faithfully.
+                    None => crate::path_safety::default_app_data_dir()?
+                        .to_string_lossy()
+                        .into_owned(),
+                };
                 let mut allowed_paths = workspaces.clone();
                 allowed_paths.push(app_data_dir);
                 let mut ws_policies = policy::workspace_only(allowed_paths);
@@ -288,7 +304,16 @@ impl Agent<Unstarted> {
             }
 
             if !final_policies.is_empty() {
-                let enforcer = Arc::new(PolicyEnforcer::new(final_policies, Vec::new()));
+                // Route through `enforce()` rather than constructing the
+                // enforcer directly: it runs the two fail-closed startup
+                // validations (an AskUser policy with no handler, and MCP
+                // policies without registered servers) and derives the MCP
+                // server names, without which every `server/tool` policy is
+                // silently inert. Upstream agent.py:105-110.
+                let enforcer = Arc::new(policy::enforce(
+                    final_policies,
+                    Some(&self.config.mcp_servers),
+                )?);
                 self.hook_runner.register(enforcer).await;
             }
 
