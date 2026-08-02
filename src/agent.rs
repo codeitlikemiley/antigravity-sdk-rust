@@ -357,7 +357,7 @@ impl Agent<Unstarted> {
                 let mut trigger_runner = None;
                 if !self.config.triggers.is_empty() {
                     let runner = TriggerRunner::new(self.config.triggers.clone());
-                    runner.start(&conversation.connection());
+                    runner.start(&conversation.connection())?;
                     trigger_runner = Some(runner);
                 }
 
@@ -414,7 +414,7 @@ impl Agent<Unstarted> {
                     None
                 } else {
                     let runner = TriggerRunner::new(self.config.triggers.clone());
-                    runner.start(&conversation.connection());
+                    runner.start(&conversation.connection())?;
                     Some(runner)
                 };
 
@@ -464,6 +464,11 @@ impl Agent<Started> {
     ///
     /// Returns an error if closing the connection fails.
     pub async fn stop(&self) -> Result<(), anyhow::Error> {
+        // Before disconnecting: triggers hold a connection handle, and stopping
+        // them afterwards left a background task nudging a dead session.
+        if let Some(ref runner) = self.state.trigger_runner {
+            runner.stop();
+        }
         self.state.conversation.disconnect().await?;
         Ok(())
     }

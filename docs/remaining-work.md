@@ -73,8 +73,8 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | ~~S2~~ | **Done** — `HookRunner::gate_tool_call` is the single decision point at both transports and both call sites; a hook that errors denies and the model is told the gate could not decide | S |
 | H4 | Narrow `on_tool_error`: never clear the error, never downgrade the step. It currently reports a failed tool to the model as a genuine success | M |
 | T1+T9 | Construct and inject the `ToolContext` — it is never constructed today, so context-aware tools do not work at all | S |
-| A1 | `TriggerRunner::stop` + double-start guard; `Agent::stop` calls it. Triggers currently outlive the agent | M |
-| A10 | Narrow the trigger surface to a one-method `TriggerContext` | S |
+| ~~A1~~ | **Done** — `stop`/`is_running`/double-start guard, and `Agent::stop` stops triggers before disconnecting | M |
+| ~~A10~~ | **Done** — `TriggerContext::send` is the whole surface | S |
 
 **The rest:**
 
@@ -93,7 +93,7 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | T4 | Coerce model-supplied arguments against the tool's JSON Schema | M |
 | ~~T10~~ | **Done** — the batch joins, and the registry lock is released before any tool body runs | S |
 | X19 | Exercise context-aware tools in an example and tests | S |
-| A11 | `every()` invokes a callback and rejects a non-positive interval | S |
+| ~~A11~~ | **Done** — `every(interval, callback)` plus `every_notification` for the fixed-message case; both reject a zero interval | S |
 | ~~finish-extractor~~ | **Done** — `FINISH` classifies as a tool call, so the one call that ends a turn is finally visible to policies and hooks | XS |
 
 ---
@@ -200,7 +200,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
 | D4 | Tool runner — **T7+T8, T10, `finish-extractor` done**; T4 (schema coercion) remains | T7+T8, T4, T10, `finish-extractor` | M |
 | D5 | `ToolContext` | T1+T9, `tool-context-state-atomicity`, X19 | M |
-| D6 | Triggers | A10, A1, A11 | M |
+| ~~D6~~ | Triggers — **done** | A10, A1, A11 | M |
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |
 | D8 | Remaining hook signatures | H1b, H1d+H16 | S |
 
