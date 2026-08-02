@@ -36,6 +36,15 @@ pub trait Connection: Send + Sync {
         content: &str,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
+    /// Sends a multimodal prompt — text, attachments, slash commands.
+    ///
+    /// Goes out as `complex_user_input`; the plain `send` field is a bare
+    /// string and cannot carry either.
+    fn send_content(
+        &self,
+        content: &crate::types::Content,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
+
     /// Sends a trigger notification message to the connection.
     fn send_trigger_notification(
         &self,
@@ -205,6 +214,17 @@ impl Connection for AnyConnection {
             Self::Wasm(c) => c.send(content).await,
             #[cfg(test)]
             Self::Mock(c) => c.send(content).await,
+        }
+    }
+
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Local(c) => c.send_content(content).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Wasm(c) => c.send_content(content).await,
+            #[cfg(test)]
+            Self::Mock(c) => c.send_content(content).await,
         }
     }
 
@@ -385,6 +405,19 @@ impl Connection for MockConnection {
 
     async fn send_trigger_notification(&self, _content: &str) -> Result<(), anyhow::Error> {
         Ok(())
+    }
+
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        let text = content
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                crate::types::ContentPrimitive::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.send(&text).await
     }
 
     async fn send_halt_request(&self) -> Result<(), anyhow::Error> {

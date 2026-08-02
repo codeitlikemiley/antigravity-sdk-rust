@@ -39,7 +39,7 @@ sanitization; 127.0.0.1 connect fallback.
 | WP-7 | Tool runner correctness: `error_message` on the wire, argument coercion, `ToolContext` wiring, media extraction | M | WP-1 |
 | WP-9 | Capability surface: MCP servers on the wire, `search_web`/`read_url_content`, custom subagents, retry config, tool-name casing | L | WP-1, WP-4 |
 | WP-8 | Harness-side hook channel: `LifecycleHook`, `CallHookRequest`/`Response`, the router, `enabled_hooks`. Largest single item; contains the `Hook` trait break | XL | WP-1, WP-5, WP-6 |
-| WP-10 | Public API surface: multimodal prompts, slash commands, `Connection` trait changes, trigger narrowing | L | WP-5, WP-6, WP-8 |
+| ~~WP-10~~ | **Done** across A10 (trigger narrowing), B4 and E6 | L | — |
 | WP-11 | Tooling, CI, docs, examples, skills — **the drift job landed**; the rest has been kept current batch by batch | M | — |
 
 **WP-3** (security hardening) is complete — it landed as WI-1…WI-8 in #8.
@@ -210,7 +210,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 > is expected. Pulling `HookContext`'s signature half into D8 would avoid that
 > second break; that remains an open option.
 
-### Phase E — hooks and the rest
+### Phase E — hooks and the rest — **complete**
 
 | # | Batch | Items | Size |
 |---|---|---|---|
@@ -219,7 +219,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~E3~~ | Hook context threading — **done**. Every method takes `&HookContext`; the runner owns one session-scoped store, so a hook can record in one event and read in the next | L |
 | ~~E4~~ | Hook proto + router — **done**. `answer_hook_request` answers every path including the ones it does not understand; an unanswered request is a deadlock, not a no-op | L |
 | ~~E5~~ | Turn on `enabled_hooks` — **done**, and only now that the router answers. The field carries exactly what registered hooks declared | S |
-| E6 | Public API surface | WP-10: multimodal prompts, slash commands, `Connection` trait | L |
+| ~~E6~~ | Public API surface — **done**. `Content`/`ContentPrimitive` existed and reached nothing; they now go out as `complex_user_input`, with a `SlashCommand` variant added. `Connection` gained `send_content` and `wait_for_idle`; `Conversation` gained `send_content`, `chat_content_to_completion`, `cancel` and `last_structured_output` | L |
 | E7 | Docs, examples, drift job — **the drift job is done** (`scripts/check_upstream_drift.py`, weekly + advisory on PRs, verified against the live 0.1.9 release). Docs and examples have been updated batch by batch alongside the code | WP-11 | M |
 
 > **E5 was last, as required.** It landed only after E4's router, because

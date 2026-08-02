@@ -423,3 +423,33 @@ would block on a stream with nothing to deliver.
 `wait_for_idle()` resolves when the turn in flight finishes, returning
 immediately if none is running. It is watch-backed, so it notices the moment
 the harness reports idle rather than on the next tick of a poll loop.
+
+## Multimodal prompts and slash commands
+
+`Content` carries text, attachments and slash commands, and goes out as the
+harness's `complex_user_input` — the plain prompt field is a bare string and can
+carry none of them. The types existed in this crate and reached nothing: a
+caller could build a `Content` and had no way to send it.
+
+```rust,no_run
+# use antigravity_sdk_rust::types::{Content, ContentPrimitive, Media, MimeType, ImageMime};
+# async fn demo(agent: &antigravity_sdk_rust::agent::Agent<antigravity_sdk_rust::agent::Started>) -> Result<(), anyhow::Error> {
+let prompt = Content::Multi(vec![
+    ContentPrimitive::Text("what changed in this screenshot?".to_string()),
+    ContentPrimitive::Media(Media {
+        data: std::fs::read("before.png")?,
+        mime_type: MimeType::Image(ImageMime::Png),
+        description: None,
+    }),
+]);
+let response = agent.chat_content(&prompt).await?;
+# Ok(()) }
+```
+
+Text parts go through the same control-character strip as a plain prompt — a
+multimodal path that skipped it would be a way around it. An empty prompt is
+rejected before it reaches the harness, whichever form it takes.
+
+`last_structured_output()` returns the most recent `FINISH` payload, which is
+what a `response_schema` produces; reaching it previously meant walking
+`history()` backwards looking for the right step type.

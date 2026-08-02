@@ -1183,6 +1183,8 @@ pub enum ContentPrimitive {
     Text(String),
     /// Binary media content (image, document, audio, or video).
     Media(Media),
+    /// A slash command for the harness to expand, without the leading slash.
+    SlashCommand(String),
 }
 
 /// Agent prompt content — a single primitive or a list of primitives.
@@ -1199,6 +1201,38 @@ pub enum Content {
 }
 
 impl Content {
+    /// The parts, in order, whichever shape this is.
+    #[must_use]
+    pub fn parts(&self) -> Vec<&ContentPrimitive> {
+        match self {
+            Self::Single(part) => vec![part],
+            Self::Multi(parts) => parts.iter().collect(),
+        }
+    }
+
+    /// Whether the prompt carries nothing the harness could act on.
+    ///
+    /// An empty multimodal prompt is rejected the same as an empty string.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts().into_iter().all(|part| match part {
+            ContentPrimitive::Text(text) => text.trim().is_empty(),
+            ContentPrimitive::Media(media) => media.data.is_empty(),
+            ContentPrimitive::SlashCommand(name) => name.trim().is_empty(),
+        })
+    }
+
+    /// Appends a slash command.
+    #[must_use]
+    pub fn with_slash_command(self, name: impl Into<String>) -> Self {
+        let mut parts: Vec<ContentPrimitive> = match self {
+            Self::Single(part) => vec![part],
+            Self::Multi(parts) => parts,
+        };
+        parts.push(ContentPrimitive::SlashCommand(name.into()));
+        Self::Multi(parts)
+    }
+
     /// Creates a text-only content.
     pub fn text(s: impl Into<String>) -> Self {
         Self::Single(ContentPrimitive::Text(s.into()))

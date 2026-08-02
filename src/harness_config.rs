@@ -770,3 +770,100 @@ mod subagent_tests {
         assert_eq!(tools.file_edit.as_ref().unwrap().enabled, Some(true));
     }
 }
+
+/// Maps a multimodal prompt onto the harness's `UserInput`.
+///
+/// The plain `user_input` field is a bare string and cannot carry an
+/// attachment or a slash command; `complex_user_input` (field 7) is the shape
+/// that can. The types existed in this crate and reached nothing — a caller
+/// could build a `Content` and had no way to send it.
+#[must_use]
+pub fn build_user_input_proto(
+    content: &crate::types::Content,
+) -> crate::proto::localharness::UserInput {
+    use crate::proto::localharness::{UserInput, user_input};
+    use crate::types::ContentPrimitive;
+
+    let parts = content
+        .parts()
+        .into_iter()
+        .map(|part| user_input::Part {
+            part: Some(match part {
+                ContentPrimitive::Text(text) => user_input::part::Part::Text(sanitize_prompt(text)),
+                ContentPrimitive::Media(media) => {
+                    user_input::part::Part::Media(user_input::Media {
+                        mime_type: Some(media.mime_type.to_string()),
+                        description: media.description.clone(),
+                        data: Some(media.data.clone()),
+                    })
+                }
+                ContentPrimitive::SlashCommand(name) => {
+                    user_input::part::Part::SlashCommand(user_input::SlashCommand {
+                        name: Some(name.clone()),
+                    })
+                }
+            }),
+        })
+        .collect();
+
+    UserInput { parts }
+}
+
+#[cfg(test)]
+mod user_input_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::build_user_input_proto;
+    use crate::proto::localharness::user_input::part::Part;
+    use crate::types::{Content, ContentPrimitive, ImageMime, Media, MimeType};
+
+    #[test]
+    fn text_media_and_slash_commands_all_reach_the_wire() {
+        let content = Content::Multi(vec![
+            ContentPrimitive::Text("describe this".to_string()),
+            ContentPrimitive::Media(Media {
+                data: vec![1, 2, 3],
+                mime_type: MimeType::Image(ImageMime::Png),
+                description: Some("a screenshot".to_string()),
+            }),
+            ContentPrimitive::SlashCommand("review".to_string()),
+        ]);
+
+        let proto = build_user_input_proto(&content);
+        assert_eq!(proto.parts.len(), 3);
+        match proto.parts[0].part.as_ref().unwrap() {
+            Part::Text(text) => assert_eq!(text, "describe this"),
+            other => panic!("unexpected part {other:?}"),
+        }
+        match proto.parts[1].part.as_ref().unwrap() {
+            Part::Media(media) => {
+                assert_eq!(media.mime_type.as_deref(), Some("image/png"));
+                assert_eq!(media.data.as_deref(), Some(&[1u8, 2, 3][..]));
+                assert_eq!(media.description.as_deref(), Some("a screenshot"));
+            }
+            other => panic!("unexpected part {other:?}"),
+        }
+        match proto.parts[2].part.as_ref().unwrap() {
+            Part::SlashCommand(command) => assert_eq!(command.name.as_deref(), Some("review")),
+            other => panic!("unexpected part {other:?}"),
+        }
+    }
+
+    /// Text parts go through the same control-character strip as a plain
+    /// prompt — a multimodal path that skipped it would be a way around it.
+    #[test]
+    fn text_parts_are_sanitized() {
+        let content = Content::text("hello\u{0}world");
+        let proto = build_user_input_proto(&content);
+        match proto.parts[0].part.as_ref().unwrap() {
+            Part::Text(text) => assert!(!text.contains('\u{0}'), "{text:?}"),
+            other => panic!("unexpected part {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_prompt_is_recognised() {
+        assert!(Content::text("   ").is_empty());
+        assert!(!Content::text("hi").is_empty());
+        assert!(!Content::text("").with_slash_command("review").is_empty());
+    }
+}

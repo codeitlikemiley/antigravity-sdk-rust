@@ -482,6 +482,25 @@ impl Agent<Started> {
         self.state.conversation.chat_to_completion(prompt).await
     }
 
+    /// Sends a multimodal prompt — text, attachments, slash commands — and
+    /// resolves once the model completes its response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt carries nothing, or if the turn fails.
+    pub async fn chat_content(
+        &self,
+        content: &crate::types::Content,
+    ) -> Result<ChatResponse, anyhow::Error> {
+        if content.is_empty() {
+            return Err(anyhow!("prompt must not be empty"));
+        }
+        self.state
+            .conversation
+            .chat_content_to_completion(content)
+            .await
+    }
+
     /// Returns the active [`Conversation`] session.
     pub fn conversation(&self) -> Arc<Conversation> {
         self.state.conversation.clone()

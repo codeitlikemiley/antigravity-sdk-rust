@@ -202,6 +202,50 @@ impl Conversation {
         self.conn.send(prompt).await
     }
 
+    /// Sends a multimodal prompt — text, attachments, slash commands.
+    ///
+    /// The same turn bookkeeping as [`send`](Self::send), including the drain
+    /// of the previous turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt is empty, or if the connection fails.
+    pub async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        if content.is_empty() {
+            return Err(anyhow::anyhow!(
+                "the prompt is empty; an empty prompt is rejected before it reaches the harness"
+            ));
+        }
+
+        let turn_in_flight = !self.state.lock().await.turn_start_indices.is_empty();
+        if turn_in_flight && !self.conn.is_idle() {
+            let mut leftovers = self.receive_steps();
+            while leftovers.next().await.is_some() {}
+        }
+
+        let mut state = self.state.lock().await;
+        let len = state.steps.len();
+        state.turn_start_indices.push(len);
+        state.turn_usage = None;
+        drop(state);
+        self.conn.send_content(content).await
+    }
+
+    /// The structured output of the most recent `FINISH`, if there was one.
+    ///
+    /// This is what a `response_schema` produces. Reaching it previously meant
+    /// walking `history()` backwards looking for the right step type.
+    pub async fn last_structured_output(&self) -> Option<serde_json::Value> {
+        let state = self.state.lock().await;
+        let found = state
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| step.structured_output.clone());
+        drop(state);
+        found
+    }
+
     /// Subscribes to step updates from the connection, inserting them into history and enforcing history limits.
     pub fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let conn_stream = self.conn.receive_steps();
@@ -340,7 +384,26 @@ impl Conversation {
     ///
     /// Returns an error if sending the prompt or receiving chunk responses fails.
     pub async fn chat_to_completion(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
-        let mut chunks = self.chat(prompt).await?;
+        self.send(prompt).await?;
+        self.collect_turn().await
+    }
+
+    /// Sends a multimodal prompt and collects the whole reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt is empty or the connection fails.
+    pub async fn chat_content_to_completion(
+        &self,
+        content: &crate::types::Content,
+    ) -> Result<ChatResponse, anyhow::Error> {
+        self.send_content(content).await?;
+        self.collect_turn().await
+    }
+
+    /// Drains the turn in flight into a [`ChatResponse`].
+    async fn collect_turn(&self) -> Result<ChatResponse, anyhow::Error> {
+        let mut chunks = self.receive_chunks();
         let mut text = String::new();
         let mut thinking = String::new();
         while let Some(chunk_res) = chunks.next().await {

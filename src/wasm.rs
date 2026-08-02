@@ -1352,6 +1352,38 @@ impl Connection for WasmConnection {
         Ok(())
     }
 
+    async fn send_content(&self, content: &crate::types::Content) -> Result<(), anyhow::Error> {
+        crate::hook_dispatch::gate_turn(self.hook_runner.as_ref()).await?;
+
+        self.is_idle.store(false, Ordering::SeqCst);
+        let _ = self.idle_tx.send(false);
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        {
+            let mut main_id = self.main_trajectory_id.lock().await;
+            *main_id = None;
+        }
+        {
+            self.subagent_responses.lock().await.clear();
+        }
+        {
+            let mut guard = self.step_rx.lock().await;
+            if let Some(rx) = &mut *guard {
+                while rx.try_recv().is_ok() {}
+            }
+        }
+
+        let input_event = InputEvent {
+            event: Some(
+                crate::proto::localharness::input_event::Event::ComplexUserInput(
+                    crate::harness_config::build_user_input_proto(content),
+                ),
+            ),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
     async fn send_trigger_notification(&self, content: &str) -> Result<(), anyhow::Error> {
         let input_event = InputEvent {
             event: Some(
