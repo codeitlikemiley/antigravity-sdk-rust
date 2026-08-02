@@ -71,6 +71,53 @@ impl ToolContext {
             }
         }
     }
+
+    /// Atomically reads, transforms and writes a state entry.
+    ///
+    /// `get_state` followed by `set_state` releases the lock in between, so two
+    /// tools running concurrently can both read the old value and one write is
+    /// lost. This holds the lock across the transform, which is the only safe
+    /// way to do read-modify-write on shared state. Mirrors upstream's
+    /// `update_state` (`utils/state.py`, added 0.1.7).
+    ///
+    /// The closure receives the current value, or `None` when the key is unset.
+    /// Returning `None` leaves the entry untouched.
+    ///
+    /// ```
+    /// # use antigravity_sdk_rust::tool_context::ToolContext;
+    /// # fn demo(ctx: &ToolContext) {
+    /// ctx.update_state::<u32, _>("calls", |current| Some(current.unwrap_or(0) + 1));
+    /// # }
+    /// ```
+    pub fn update_state<T, F>(&self, key: &str, transform: F)
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce(Option<T>) -> Option<T>,
+    {
+        update_locked(&self.state, key, transform);
+    }
+}
+
+/// The read-modify-write half of [`ToolContext::update_state`], separated so it
+/// can be tested without a live connection — constructing a `ToolContext`
+/// requires one, which is also why nothing currently constructs one (audit T1).
+fn update_locked<T, F>(state: &Mutex<HashMap<String, Value>>, key: &str, transform: F)
+where
+    T: Serialize + DeserializeOwned,
+    F: FnOnce(Option<T>) -> Option<T>,
+{
+    let Ok(mut store) = state.lock() else {
+        return;
+    };
+    let current = store
+        .get(key)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+    if let Some(next) = transform(current)
+        && let Ok(v) = serde_json::to_value(next)
+    {
+        store.insert(key.to_string(), v);
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +129,7 @@ mod tests {
         clippy::significant_drop_tightening
     )]
     use super::*;
+    use std::sync::Arc;
 
     // ToolContext tests require a mock connection which is only available
     // via the full test harness. Unit tests here validate the state store.
@@ -108,5 +156,38 @@ mod tests {
         let val: i32 =
             serde_json::from_value(state.lock().unwrap().get("key").cloned().unwrap()).unwrap();
         assert_eq!(val, 2);
+    }
+
+    /// The point of the method: a read-modify-write that cannot interleave.
+    /// A `get_state` + `set_state` pair releases the lock in between, so a
+    /// concurrent increment is lost — 800 here would come out lower.
+    #[test]
+    fn update_locked_is_atomic_across_threads() {
+        let state: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    update_locked::<u32, _>(&state, "n", |c| Some(c.unwrap_or(0) + 1));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().ok();
+        }
+        let stored: u32 =
+            serde_json::from_value(state.lock().unwrap().get("n").cloned().unwrap()).unwrap();
+        assert_eq!(stored, 800);
+    }
+
+    #[test]
+    fn update_locked_returning_none_leaves_the_entry() {
+        let state: Mutex<HashMap<String, Value>> = Mutex::new(HashMap::new());
+        update_locked::<u32, _>(&state, "k", |_| Some(7));
+        update_locked::<u32, _>(&state, "k", |_| None);
+        let stored: u32 =
+            serde_json::from_value(state.lock().unwrap().get("k").cloned().unwrap()).unwrap();
+        assert_eq!(stored, 7);
     }
 }

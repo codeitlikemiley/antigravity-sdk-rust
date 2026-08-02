@@ -110,7 +110,6 @@ blocked on the migration.
 | predicate-args-fidelity | Policy predicate args drop `ActionEditFile.diff_block` and inject non-proto keys | S |
 | single-consumer-receive-steps | Concurrent `receive_steps()` calls silently split the stream | XS |
 | ask-question-builtin | `BuiltinTools` missing `ASK_QUESTION`; `user_questions.enabled` hardcoded | XS |
-| tool-context-state-atomicity | Add `update_state` before X19 publishes a read-modify-write race as the flagship example | XS |
 | policy-docs-and-tool-name-selectors | `docs/policy.md` is referenced by the plan but created by nothing; shipped policy examples can never match | S |
 
 ---
