@@ -364,6 +364,21 @@ impl Connection for LocalConnection {
     }
 }
 
+/// Where the harness stores its state when the caller named no `save_dir`.
+///
+/// Per-conversation so two concurrent agents do not share a directory.
+fn default_save_dir(conversation_id: &str) -> String {
+    let leaf = if conversation_id.is_empty() {
+        "antigravity-session".to_string()
+    } else {
+        format!("antigravity-{conversation_id}")
+    };
+    std::env::temp_dir()
+        .join(leaf)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Configurator and builder to spawn a local helper subprocess and build a connection.
 #[derive(Debug)]
 pub struct LocalConnectionStrategy {
@@ -391,12 +406,17 @@ pub struct LocalConnectionStrategy {
     pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Extra environment for the harness process, sent on `InputConfig.env`.
+    ///
+    /// Not a field of [`new`](Self::new) — set it on the struct. The harness
+    /// also inherits this process's environment; these are additions on top.
+    pub env: HashMap<String, String>,
 }
 
 impl LocalConnectionStrategy {
     /// Creates a new `LocalConnectionStrategy`.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         binary_path: String,
         gemini_config: GeminiConfig,
         capabilities_config: CapabilitiesConfig,
@@ -423,6 +443,7 @@ impl LocalConnectionStrategy {
             conversation_id,
             session_continuation_mode,
             mcp_servers,
+            env: HashMap::new(),
         }
     }
 
@@ -506,10 +527,15 @@ impl LocalConnectionStrategy {
         };
 
         let input_config = InputConfig {
-            // Populating this is WP-6; the harness inherits the process
-            // environment either way.
-            env: std::collections::HashMap::new(),
-            storage_directory: self.save_dir.clone(),
+            env: self.env.clone(),
+            // A harness with nowhere to write puts its state next to whatever
+            // its working directory happens to be. Defaulting to a per-session
+            // temp directory keeps that out of the caller's repository.
+            storage_directory: Some(
+                self.save_dir
+                    .clone()
+                    .unwrap_or_else(|| default_save_dir(&self.conversation_id)),
+            ),
             port: None,
             bind_address: None,
             client_info: Some(client_info),
@@ -538,15 +564,29 @@ impl LocalConnectionStrategy {
             .ok_or_else(|| anyhow!("Harness OutputConfig missing api_key"))?;
 
         // 3. Setup WebSocket connection
-        let ws_url = format!("ws://localhost:{port}/");
-        let mut req = ws_url.clone().into_client_request()?;
-        req.headers_mut()
-            .insert("x-goog-api-key", harness_api_key.parse()?);
+        //
+        // The harness binds 127.0.0.1. On a host where `localhost` resolves to
+        // ::1 first, every attempt against the name fails with connection
+        // refused while the literal works — so both are tried, alternating, and
+        // the error names whichever was tried last.
+        let ws_urls = [
+            format!("ws://localhost:{port}/"),
+            format!("ws://127.0.0.1:{port}/"),
+        ];
+        let mut requests = Vec::with_capacity(ws_urls.len());
+        for url in &ws_urls {
+            let mut req = url.clone().into_client_request()?;
+            req.headers_mut()
+                .insert("x-goog-api-key", harness_api_key.parse()?);
+            requests.push(req);
+        }
 
         // Connect with retry/backoff
         let mut ws_stream = None;
         let mut delay = std::time::Duration::from_millis(100);
         for attempt in 0..5 {
+            let ws_url = &ws_urls[attempt % ws_urls.len()];
+            let req = requests[attempt % requests.len()].clone();
             // Tool results and file contents routinely exceed tungstenite's
             // default 16 MiB frame / 64 MiB message caps, and upstream sets
             // max_size=None for exactly that reason
@@ -557,7 +597,7 @@ impl LocalConnectionStrategy {
                 max_frame_size: None,
                 ..WebSocketConfig::default()
             };
-            match connect_async_with_config(req.clone(), Some(ws_config), false).await {
+            match connect_async_with_config(req, Some(ws_config), false).await {
                 Ok((stream, _)) => {
                     ws_stream = Some(stream);
                     break;

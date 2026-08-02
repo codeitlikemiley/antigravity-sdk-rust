@@ -6,7 +6,7 @@ Every row is a unit of work that can be picked up on its own once its blockers
 are clear. Item IDs match the two plans — read the corresponding section there
 before starting one.
 
-**Status as of 2026-08-02.** Phase A is complete except A2's `is_idle` flip and A5. 16 items landed: WI-1…WI-8 and WI-14 (merged in
+**Status as of 2026-08-02.** Phase A is complete except A2's `is_idle` flip (C2) and A5's wasm half. 16 items landed: WI-1…WI-8 and WI-14 (merged in
 #8); WP-1, the core of WP-2, the core of WP-6 and C5 (open in #9).
 
 > **The handshake now works.** `connect()` reads
@@ -32,7 +32,7 @@ sanitization; 127.0.0.1 connect fallback.
 
 | ID | What | Size | Blocked by |
 |---|---|---|---|
-| WP-6 | Core landed. Remainder: seed `Conversation` from the replayed history, `env` passthrough, `DebugConfig`, `save_dir` default, prompt sanitization, 127.0.0.1 fallback | S | — |
+| WP-6 | Core landed; remainder landed as A5 except the wasm handshake read and `DebugConfig` | S | — |
 | WP-2 tail | `session_end` reply; a `callHookRequest` branch so WP-8 is exercisable; assert `clientInfo.os`/`env` on the handshake; replace the wasm in-file mock's closed Rust→Rust loop with real fixtures | S | — |
 | **WP-5** | **Turn lifecycle and idle state machine** — now the blocker for a real turn completing: `STATE_CANCELLED`, `TrajectoryStateUpdate.error`, the sentinel protocol, main-trajectory tracking, cancel support | L | WP-1, WP-2 |
 | WP-4 | Model configuration public API — `ModelTarget` / `ModelEndpoint` replacing `GeminiConfig`; the wire shape is already correct, this is the type graph and the env-var routing | L | WP-1 |
@@ -154,7 +154,7 @@ plans.
 | A2 | Sentinel restructure — **loop half done**; the `StepEvent` enum and C2 remain | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
 | ~~A3~~ | Cancellation — **done**. `Conversation::cancel()` sets a `cancel_requested` flag on the connection; the reader converts the harness's plain `STATE_FULLY_IDLE` into `AntigravityError::Cancelled`, and `send()` clears the flag so it cannot leak into the next turn. Covered by `test_cancel_surfaces_cancelled_error` | S | A cancelled turn is distinguishable from a completed one |
 | ~~A4~~ | Turn-level errors — **done**. The stderr reader keeps a 20-line tail; when the socket closes before idle, the stream yields `harness connection closed before the turn finished` with those lines attached. Covered by `test_harness_crash_surfaces_stderr_tail` | S | A turn that fails server-side surfaces an error instead of ending silently |
-| A5 | WP-6 remainder — **prompt sanitization done**. Remaining: seed `Conversation` from `initial_history`; `env` passthrough; `save_dir` temp default; 127.0.0.1 fallback; `DebugConfig` | M | A resumed conversation starts with its history |
+| A5 | WP-6 remainder — **done on the native transport**: `Conversation::seed_history()` seeded from the handshake reply (turn boundaries recovered from user-sourced steps), `AgentConfig::env` on `InputConfig.env`, a per-conversation temp `save_dir` default, and a 127.0.0.1 fallback for hosts where `localhost` resolves to ::1 first. **Remaining**: the same seeding on wasm (its reader loop is already running when the reply arrives, so `connect()` has nothing to hand back — it needs local.rs's blocking handshake read), and `DebugConfig`, which is not in the 0.1.9 proto and needs an upstream reading before it is designed | M | A resumed conversation starts with its history |
 
 **After Phase A the SDK should complete a real turn against a 0.1.9 harness.**
 That is the milestone worth cutting a release around.

@@ -68,6 +68,35 @@ impl Conversation {
         }
     }
 
+    /// Pre-populates history with steps the harness replayed when the session
+    /// was resumed.
+    ///
+    /// Called once by `Agent::start`, before any turn. Turn boundaries are
+    /// recovered from the steps themselves — each one sourced from the user
+    /// opens a turn — so [`turn_count`](Self::turn_count) and
+    /// [`last_response`](Self::last_response) describe the resumed session
+    /// rather than an empty one. Without this a resumed conversation looked
+    /// brand new to the caller even though the harness had its full history.
+    ///
+    /// A no-op if history is already non-empty, so it cannot clobber a live
+    /// session.
+    pub async fn seed_history(&self, steps: Vec<Step>) {
+        if steps.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        if !state.steps.is_empty() {
+            return;
+        }
+        state.turn_start_indices = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.source == crate::types::StepSource::User)
+            .map(|(i, _)| i)
+            .collect();
+        state.steps = steps;
+    }
+
     /// Returns the underlying [`Connection`].
     pub fn connection(&self) -> AnyConnection {
         self.conn.clone()
@@ -387,6 +416,64 @@ mod tests {
         assert!(conv.is_idle());
         assert_eq!(conv.history().await.len(), 0);
         assert_eq!(conv.turn_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn seed_history_recovers_turn_boundaries() {
+        let (_conn, conv) = test_setup("conv-123", Some(10));
+        let replayed = vec![
+            Step {
+                source: StepSource::User,
+                content: "first question".to_string(),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::Model,
+                content: "first answer".to_string(),
+                is_complete_response: Some(true),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::User,
+                content: "second question".to_string(),
+                ..Default::default()
+            },
+            Step {
+                source: StepSource::Model,
+                content: "second answer".to_string(),
+                is_complete_response: Some(true),
+                ..Default::default()
+            },
+        ];
+        conv.seed_history(replayed).await;
+
+        assert_eq!(conv.history().await.len(), 4);
+        // Two user prompts in the replay: the resumed session is two turns in,
+        // not zero.
+        assert_eq!(conv.turn_count().await, 2);
+        assert_eq!(conv.last_response().await, "second answer");
+    }
+
+    /// Seeding must never overwrite a session that has already said something.
+    #[tokio::test]
+    async fn seed_history_leaves_a_live_session_alone() {
+        let (_conn, conv) = test_setup("conv-123", Some(10));
+        conv.seed_history(vec![Step {
+            source: StepSource::User,
+            content: "resumed".to_string(),
+            ..Default::default()
+        }])
+        .await;
+        conv.seed_history(vec![Step {
+            source: StepSource::User,
+            content: "clobber".to_string(),
+            ..Default::default()
+        }])
+        .await;
+
+        let history = conv.history().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "resumed");
     }
 
     #[tokio::test]

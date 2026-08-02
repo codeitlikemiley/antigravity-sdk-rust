@@ -26,7 +26,17 @@ pub struct AgentConfig {
     /// Optional system instructions (either appended template sections or fully custom text).
     pub system_instructions: Option<SystemInstructions>,
     /// Optional directory to save session state logs.
+    ///
+    /// Defaults to a per-conversation directory under the system temp
+    /// directory, so a harness with nowhere to write does not scatter state
+    /// through the caller's working directory.
     pub save_dir: Option<String>,
+    /// Extra environment variables for the harness process.
+    ///
+    /// Added on top of the environment the harness inherits from this process;
+    /// sent on `InputConfig.env`. Native transport only — a browser has no
+    /// subprocess to give an environment to.
+    pub env: std::collections::HashMap<String, String>,
     /// Configured workspaces. If not provided, defaults to the current working directory.
     pub workspaces: Option<Vec<String>>,
     /// Paths to local folders containing custom skill modules.
@@ -63,6 +73,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("capabilities", &self.capabilities)
             .field("system_instructions", &self.system_instructions)
             .field("save_dir", &self.save_dir)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("workspaces", &self.workspaces)
             .field("skills_paths", &self.skills_paths)
             .field("policies", &self.policies)
@@ -382,12 +393,21 @@ impl Agent<Unstarted> {
                     self.config.session_continuation_mode,
                     self.config.mcp_servers.clone(),
                 );
+                let strategy = LocalConnectionStrategy {
+                    env: self.config.env.clone(),
+                    ..strategy
+                };
 
                 let conn = strategy.connect().await?;
+                // A resumed session's history comes back in the handshake reply.
+                // Seeded before the first turn so `history()`, `turn_count()`
+                // and `last_response()` describe the session that was resumed.
+                let replayed = conn.initial_history().to_vec();
                 let conversation = Arc::new(Conversation::new(
                     crate::connection::AnyConnection::Local(Arc::new(conn)),
                     None,
                 ));
+                conversation.seed_history(replayed).await;
 
                 // 7. Start triggers
                 let trigger_runner = if self.config.triggers.is_empty() {
@@ -515,6 +535,20 @@ impl<P> AgentBuilder<P> {
 
     pub fn save_dir(mut self, save_dir: impl Into<String>) -> Self {
         self.config.save_dir = Some(save_dir.into());
+        self
+    }
+
+    /// Adds environment variables for the harness process.
+    ///
+    /// Merged into whatever was set before, so it can be called more than once.
+    pub fn env<K, V>(mut self, vars: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.config
+            .env
+            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 

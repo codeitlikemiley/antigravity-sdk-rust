@@ -150,7 +150,15 @@ pub fn step_from_update(step_update: &StepUpdate) -> Option<crate::types::Step> 
     let trajectory_id = step_update.trajectory_id.clone().unwrap_or_default();
     let step_index = step_update.step_index.unwrap_or(0);
 
+    // A finished model step addressed to the user is a complete response. It is
+    // what `Conversation::last_response()` looks for, so without this a resumed
+    // session reports no last response even with its full history replayed.
+    let is_complete_response = step_update.state == Some(2)
+        && step_update.source == Some(3)
+        && step_update.target == Some(1);
+
     Some(Step {
+        is_complete_response: Some(is_complete_response),
         id: format!("{trajectory_id}_{step_index}"),
         step_index,
         r#type: if step_update.finish.is_some() {

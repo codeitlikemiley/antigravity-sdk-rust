@@ -785,7 +785,12 @@ impl WasmConnectionStrategy {
                                             // with `resp.history` on a resumed session — is WP-6;
                                             // until then a resumed session silently starts empty.
                                             tracing::debug!(
-                                                "initialize_conversation_response ({} history steps) — not yet consumed, see WP-6",
+                                                // Not seeded into the Conversation on this transport:
+                                                // unlike the local one, the reader loop is already
+                                                // running when this frame arrives, so `connect()` has
+                                                // no history to hand back. Seeding it needs the same
+                                                // blocking handshake read local.rs does (A5).
+                                                "initialize_conversation_response ({} history steps) — not yet consumed, see A5",
                                                 resp.history.len()
                                             );
                                         }
