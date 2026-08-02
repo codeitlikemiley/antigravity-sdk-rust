@@ -1201,7 +1201,14 @@ impl Connection for WasmConnection {
     }
 
     async fn disconnect(&self) -> Result<(), anyhow::Error> {
-        // No explicit subprocess to kill in WASM connection.
+        // No subprocess to tear down on this transport, but the session-end
+        // hooks still have to run — upstream dispatches them from disconnect()
+        // (0.1.1 local_connection.py:686-690).
+        if let Some(ref runner) = self.hook_runner
+            && let Err(e) = runner.dispatch_session_end().await
+        {
+            tracing::error!("on_session_end hook failed: {e:?}");
+        }
         Ok(())
     }
 }

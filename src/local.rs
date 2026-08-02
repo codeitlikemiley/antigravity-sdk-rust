@@ -308,6 +308,17 @@ impl Connection for LocalConnection {
     }
 
     async fn disconnect(&self) -> Result<(), anyhow::Error> {
+        // Upstream dispatches session_end from disconnect()
+        // (0.1.1 local_connection.py:686-690). This crate defined the
+        // dispatcher and never called it, so on_session_end hooks silently
+        // never ran. Dispatched before teardown so a hook can still observe a
+        // live connection; a failing hook must not block shutdown.
+        if let Some(ref runner) = self.hook_runner
+            && let Err(e) = runner.dispatch_session_end().await
+        {
+            tracing::error!("on_session_end hook failed: {e:?}");
+        }
+
         // Ordered shutdown, mirroring upstream local_connection.py:407-455.
         // A bare kill() runs no Go defers, so cleanupAllAgents never runs and
         // the trajectory is never written to disk -- upstream's own tests spell
