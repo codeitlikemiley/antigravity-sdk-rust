@@ -437,17 +437,17 @@ pub struct ToolResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageMetadata {
     /// Tokens included in the request prompt.
-    pub prompt_token_count: i32,
+    pub prompt_token_count: u64,
     /// Tokens generated in candidates.
-    pub candidates_token_count: i32,
+    pub candidates_token_count: u64,
     /// Total combined tokens.
-    pub total_token_count: i32,
+    pub total_token_count: u64,
     /// Cache hit content tokens.
     #[serde(default)]
-    pub cached_content_token_count: i32,
+    pub cached_content_token_count: u64,
     /// Tokens consumed during inner thinking/reasoning.
     #[serde(default)]
-    pub thoughts_token_count: i32,
+    pub thoughts_token_count: u64,
 }
 
 /// The classification type of a step in the trajectory.

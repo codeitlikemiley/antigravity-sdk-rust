@@ -8,11 +8,11 @@ use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
     ClientInfo as ProtoClientInfo, FileEditToolConfig, FilesystemWorkspace, FindToolConfig,
-    GeminiConfig as ProtoGeminiConfig, GenerateImageToolConfig, GrepSearchToolConfig,
-    HarnessConfig, HarnessSideTools, InitializeConversationEvent, InputConfig, InputEvent,
-    ListDirToolConfig, MultipleChoiceAnswer, OutputConfig, OutputEvent, RunCommandToolConfig,
-    SubagentsConfig, SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool,
-    ToolConfirmation, ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
+    GenerateImageToolConfig, GrepSearchToolConfig, HarnessConfig, HarnessSideTools,
+    InitializeConversationEvent, InputConfig, InputEvent, ListDirToolConfig, MultipleChoiceAnswer,
+    OutputConfig, OutputEvent, RunCommandToolConfig, SubagentsConfig,
+    SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
+    ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
     ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
     appended_system_instructions::Section, custom_system_instructions::Part,
     user_questions_response::QuestionsResponse, workspace::WorkspaceType,
@@ -245,8 +245,8 @@ impl Connection for LocalConnection {
         let resp = ToolResponse {
             id: Some(id.to_string()),
             response_json: Some(resp_json),
+            error_message: None,
             supplemental_media: Vec::new(),
-            response: None,
         };
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
@@ -412,7 +412,10 @@ impl LocalConnectionStrategy {
             }
         }
 
-        let api_key = api_key.unwrap_or_default();
+        // Resolved for validation only; the value reaches the wire through
+        // build_models_proto, and the harness also reads GEMINI_API_KEY from
+        // the environment it inherits.
+        let _api_key = api_key.unwrap_or_default();
 
         // 1. Spawning localharness subprocess
         // Explicitly forward SHELL and PATH so the harness can fork /bin/sh for
@@ -445,12 +448,17 @@ impl LocalConnectionStrategy {
 
         // 2. Perform Handshake via length-prefixed protocol buffer over stdin/stdout
         let client_info = ProtoClientInfo {
+            os: Some(std::env::consts::OS.to_string()),
+            os_version: Some(crate::harness_config::os_version()),
             language: Some("rust".to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             language_version: Some(rustc_version()),
         };
 
         let input_config = InputConfig {
+            // Populating this is WP-6; the harness inherits the process
+            // environment either way.
+            env: std::collections::HashMap::new(),
             storage_directory: self.save_dir.clone(),
             port: None,
             bind_address: None,
@@ -518,6 +526,9 @@ impl LocalConnectionStrategy {
                     description: Some(t.description().to_string()),
                     parameters_json_schema: Some(t.parameters_json_schema().to_string()),
                     response_json_schema: None,
+                    // Deferred tool loading is a 0.1.9 capability this crate
+                    // does not use yet (audit W27).
+                    defer_loading: None,
                 });
             }
         }
@@ -562,29 +573,6 @@ impl LocalConnectionStrategy {
             }
         });
 
-        let proto_gemini = ProtoGeminiConfig {
-            api_key: Some(api_key),
-            base_url: None,
-            model_name: Some(self.gemini_config.models.default.name.clone()),
-            thinking_level: self
-                .gemini_config
-                .models
-                .default
-                .generation
-                .thinking_level
-                .map(|l| match l {
-                    crate::types::ThinkingLevel::Minimal => "minimal".to_string(),
-                    crate::types::ThinkingLevel::Low => "low".to_string(),
-                    crate::types::ThinkingLevel::Medium => "medium".to_string(),
-                    crate::types::ThinkingLevel::High => "high".to_string(),
-                }),
-            enable_url_context: self.gemini_config.enable_url_context,
-            enable_google_search: self.gemini_config.enable_google_search,
-            use_vertex: Some(self.gemini_config.vertex),
-            project: self.gemini_config.project.clone(),
-            location: self.gemini_config.location.clone(),
-        };
-
         let mut proto_workspaces = Vec::new();
         for w in &self.workspaces {
             proto_workspaces.push(ProtoWorkspace {
@@ -627,6 +615,10 @@ impl LocalConnectionStrategy {
             );
 
         let side_tools = HarnessSideTools {
+            // Enabling these is WP-9; absent means the harness default.
+            search_web: None,
+            read_url_content: None,
+            tool_search_config: None,
             find: Some(FindToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::FindFile)),
             }),
@@ -657,14 +649,23 @@ impl LocalConnectionStrategy {
             permissions: None,
             generate_image: Some(GenerateImageToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::GenerateImage)),
-                model_name: self.capabilities_config.image_model.clone(),
             }),
         };
 
         let harness_config = HarnessConfig {
             cascade_id: Some(self.conversation_id.clone()),
-            model_config: Some(
-                crate::proto::localharness::harness_config::ModelConfig::GeminiConfig(proto_gemini),
+            // Each of these is its own work package (WP-6 session continuation
+            // and retry, WP-8 hooks, WP-9 MCP and subagents). Explicitly unset
+            // so `cargo build` flags them again when those land.
+            session_continuation_mode: None,
+            retry_config: None,
+            enabled_hooks: Vec::new(),
+            custom_subagents: Vec::new(),
+            mcp_servers: Vec::new(),
+            tool_output_truncation: None,
+            models: crate::harness_config::build_models_proto(
+                &self.gemini_config,
+                self.capabilities_config.image_model.as_deref(),
             ),
             system_instructions: proto_sys,
             tools: proto_tools,
@@ -823,8 +824,11 @@ impl LocalConnectionStrategy {
                                                 Some(1) => StepStatus::Active,
                                                 Some(2) => StepStatus::Done,
                                                 Some(3) => StepStatus::WaitingForUser,
-                                                Some(4) => StepStatus::Error,
-                                                Some(5) => StepStatus::TerminalError,
+                                                // STATE_TERMINAL_ERROR = 5 was removed upstream in
+                                                // 0.1.3; a step that fails now reports STATE_ERROR,
+                                                // and a whole turn failing arrives as
+                                                // TrajectoryStateUpdate.error instead (audit W7/W23).
+                                                Some(4) => StepStatus::TerminalError,
                                                 _ => StepStatus::Unknown,
                                             };
 
@@ -1066,6 +1070,32 @@ impl LocalConnectionStrategy {
                                                 let _ = step_tx.send(Ok(sentinel));
                                             }
                                         }
+                                        crate::proto::localharness::output_event::Event::InitializeConversationResponse(resp) => {
+                                            // The harness's first frame since 0.1.4. Reading it
+                                            // during the handshake — and seeding the conversation
+                                            // with `resp.history` on a resumed session — is WP-6;
+                                            // until then a resumed session silently starts empty.
+                                            tracing::debug!(
+                                                "initialize_conversation_response ({} history steps) — not yet consumed, see WP-6",
+                                                resp.history.len()
+                                            );
+                                        }
+                                        crate::proto::localharness::output_event::Event::CallHookRequest(req) => {
+                                            // Harness-side lifecycle hooks (WP-8). The harness only
+                                            // sends these for hooks named in HarnessConfig.enabled_hooks,
+                                            // which this crate does not populate, so reaching here means
+                                            // the two have gone out of sync. The harness blocks its turn
+                                            // waiting for a CallHookResponse we cannot yet send.
+                                            tracing::warn!(
+                                                "unexpected call_hook_request (id={:?}, type={:?}); no hook router — the harness may stall. See WP-8",
+                                                req.request_id,
+                                                req.r#type
+                                            );
+                                        }
+                                        crate::proto::localharness::output_event::Event::SessionEndResponse(_) => {
+                                            // Answer to a session_end_request we do not send yet (WP-6).
+                                            tracing::debug!("session_end_response");
+                                        }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
                                             let tool_runner = tool_runner.clone();
@@ -1130,8 +1160,8 @@ impl LocalConnectionStrategy {
                                                     let resp = ToolResponse {
                                                         id: tool_call.id.clone(),
                                                         response_json: Some("{\"error\": \"Execution denied by hook policy\"}".to_string()),
+                                                        error_message: None,
                                                         supplemental_media: Vec::new(),
-                                                        response: None,
                                                     };
                                                     let input_event = InputEvent {
                                                         event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
@@ -1214,8 +1244,8 @@ impl LocalConnectionStrategy {
                                                 let resp = ToolResponse {
                                                     id: tool_call.id.clone(),
                                                     response_json: Some(resp_json),
+                                                    error_message: None,
                                                     supplemental_media: Vec::new(),
-                                                    response: None,
                                                 };
                                                 let input_event = InputEvent {
                                                     event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),

@@ -101,7 +101,7 @@ async fn handle_ws_connection(
                 "cascadeId": "test_traj",
                 "trajectoryId": "test_traj",
                 "text": "Terminal error triggered",
-                "state": "STATE_TERMINAL_ERROR",
+                "state": "STATE_ERROR",
                 "source": "SOURCE_MODEL",
                 "target": "TARGET_USER",
                 "errorMessage": "Terminal error triggered by prompt"
@@ -150,7 +150,10 @@ async fn handle_ws_connection(
     let traj_idle = serde_json::json!({
         "trajectoryStateUpdate": {
             "trajectoryId": "test_traj",
-            "state": "STATE_IDLE"
+            // Renamed from STATE_IDLE upstream in 0.1.9. The numeric value is
+            // still 2, but protojson matches on the value NAME, so the old
+            // spelling is dropped as an unknown variant and the turn never ends.
+            "state": "STATE_FULLY_IDLE"
         }
     });
     ws_stream
