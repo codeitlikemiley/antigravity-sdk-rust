@@ -143,3 +143,102 @@ Recommended order:
 One standing caveat: CI still compiles neither the wasm target nor the docs, so
 every `src/wasm.rs` mirror in this backlog is unverified. The cheap subset of
 WP-11 is worth landing early for that reason alone.
+
+---
+
+## 6. Batched delivery plan
+
+The L and XL rows above are too large to pick up in one sitting, and two of
+them (WP-5, WP-8) restructure code both transports share. This breaks them into
+batches sized to **one commit, one review, tree green at the end**. Batches are
+ordered; within a batch the items must land together.
+
+Each batch names its **done when** so it can be verified without re-reading the
+plans.
+
+### Phase A — finish the connection (the critical path)
+
+| # | Batch | Items | Size | Done when |
+|---|---|---|---|---|
+| A1 | Main-trajectory tracking | Replace `parent_idle` + `active_subagent_ids` with `main_trajectory_id` set from the first non-empty `trajectory_id`; return early for non-main trajectories; clear it in `send()` | S | A subagent going idle no longer ends the caller's turn; the `OnceLock` learning heuristic is gone |
+| A2 | Sentinel restructure **+ C2** | `StepEvent::{Step, Idle, Close}` enum replacing the `"IDLE_SENTINEL"` magic id; loop instead of returning on first idle; `store` not `swap`; then flip the initial `is_idle` to `true` | M | Upstream's idle → step → idle scenario yields the post-idle step; `test_wasm_connection_integration_mock` still passes |
+| A3 | Cancellation | `STATE_CANCELLED` arm, `Connection::cancel()`, `AntigravityError::Cancelled` | S | A cancelled turn is distinguishable from a completed one |
+| A4 | Turn-level errors | `TrajectoryStateUpdate.error` (field 4); `ActionError.error_message` fallback; harness-crash stderr tail | S | A turn that fails server-side surfaces an error instead of ending silently |
+| A5 | WP-6 remainder | Seed `Conversation` from `initial_history`; `env` passthrough; prompt sanitization; `save_dir` temp default; 127.0.0.1 fallback; `DebugConfig` | M | A resumed conversation starts with its history |
+
+**After Phase A the SDK should complete a real turn against a 0.1.9 harness.**
+That is the milestone worth cutting a release around.
+
+### Phase B — the non-breaking release (0.1.15)
+
+| # | Batch | Items | Size |
+|---|---|---|---|
+| B1 | Policy ergonomics | S15, N8 | XS |
+| B2 | Hook plumbing module | `hook-dispatch`, H1c, H9 | S |
+| B3 | Turn hooks | H1a (`pre_turn` with deny semantics), H12 | S |
+| B4 | Conversation drain | A5 + `wait-for-idle` (the latter is a prerequisite, not optional) | M |
+| B5 | Structured tool results | N3 | M |
+| B6 | Small correctness | question-answer index mismatch, `single-consumer-receive-steps`, `ask-question-builtin`, `agent-input-validation`, `step-error-and-ws-limits` | S |
+| B7 | WP-2 tail + CI subset | `session_end` reply, `callHookRequest` branch, handshake assertions; `cargo check --target wasm32`, `cargo test --doc`, build the directory examples | M |
+
+**B7 is worth pulling earlier if anything in Phase A or B touches `src/wasm.rs`**
+— CI compiles neither the wasm target nor the docs today, so every wasm mirror
+in this backlog is currently unverified.
+
+### Phase C — capability surface
+
+| # | Batch | Items | Size |
+|---|---|---|---|
+| C1 | Model types | `ModelTarget` / `ModelEndpoint` / `GeminiModelOptions`, `ThinkingLevel::ExtraHigh` | M |
+| C2 | Model resolution | The explicit → shorthand → default merge algorithm; per-target endpoint validation | M |
+| C3 | Model environment | `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT` / `_LOCATION`; stop copying the API key onto the wire | S |
+| C4 | MCP on the wire | `McpServerConfig` proto + `mcp_servers` field 14; stdio `env`, `timeout_seconds` | M |
+| C5 | Retry + truncation | `RetryConfig`, `ToolOutputTruncation` | S |
+| C6 | New built-ins | `search_web`, `read_url_content` configs and their step actions | M |
+| C7 | Subagents | `SubagentConfig` / `SubagentCapabilities` → `custom_subagents` field 17, with upstream's three validations | L |
+
+### Phase D — the breaking release (0.2.0)
+
+Batch **all** of Phase D into a single release; the audit's §6 decision 1 and the
+maintainer's §8.3 decisions both assume one break, not several.
+
+| # | Batch | Items | Size |
+|---|---|---|---|
+| D1 | Fail-closed gating | S2 | S |
+| D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
+| D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
+| D4 | Tool runner | T7+T8, T4, T10, `finish-extractor` | M |
+| D5 | `ToolContext` | T1+T9, `tool-context-state-atomicity`, X19 | M |
+| D6 | Triggers | A10, A1, A11 | M |
+| D7 | Per-turn response | A2, `chatresponse-per-turn-steps` | XS |
+| D8 | Remaining hook signatures | H1b, H1d+H16 | S |
+
+> **Before D8, settle the `HookContext` question.** The maintainer chose to ship
+> the `Hook` break now and accept a second one later (§8.3), so D8's release
+> notes must **not** claim the trait is settled — they must say a further break
+> is expected. Pulling `HookContext`'s signature half into D8 would avoid that
+> second break; that remains an open option.
+
+### Phase E — hooks and the rest
+
+| # | Batch | Items | Size |
+|---|---|---|---|
+| E1 | Hook kind registry | H3 — `declares() -> HookKinds`, the prerequisite for `enabled_hooks` | M |
+| E2 | Shared state store | `StateStore`, rebuilding `HookContext` and `ToolContext` on it (H13) | M |
+| E3 | Hook context threading | H5 — the context parameter on every `Hook` method | L |
+| E4 | Hook proto + router | H2 — `CallHookRequest`/`Response`, the 7-entry table, always-answer guarantee | L |
+| E5 | Turn on `enabled_hooks` | Emit field 16; reduce the confirmation arm to an unconditional accept | S |
+| E6 | Public API surface | WP-10: multimodal prompts, slash commands, `Connection` trait | L |
+| E7 | Docs, examples, drift job | WP-11 | M |
+
+> **E5 must be last in Phase E.** Emitting `enabled_hooks` before the router
+> exists converts a silent no-op into a mid-turn deadlock: the harness blocks
+> waiting for a `CallHookResponse` nothing can send.
+
+### Suggested cut points
+
+- **After Phase A** — the SDK works against a current harness. Cut `0.1.15-rc`.
+- **After Phase B** — ship `0.1.15`.
+- **After Phase C** — feature parity on configuration; still non-breaking.
+- **After Phase D** — ship `0.2.0`, one break.
+- **Phase E** — `0.3.0`, or fold D8 into it if `HookContext` is adopted.
