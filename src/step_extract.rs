@@ -5,6 +5,14 @@
 //! `RUN_COMMAND`'s `combined_output`/`exit_code` — so it lives here instead,
 //! where a wire fix lands once.
 
+/// Id of the synthetic step that marks an idle transition on the step channel.
+///
+/// A sentinel value on the same channel as real steps is upstream's design
+/// (`IDLE_SENTINEL`), but keying it on the id means a harness step with this
+/// literal id would be swallowed. Replacing the channel payload with an enum is
+/// the durable fix and is tracked as the remainder of batch A2.
+pub const IDLE_SENTINEL_ID: &str = "IDLE_SENTINEL";
+
 use crate::proto::localharness::StepUpdate;
 use crate::types::ToolCall;
 

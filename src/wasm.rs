@@ -353,14 +353,10 @@ impl WasmConnectionStrategy {
         // poll as end-of-stream — the stream would terminate before any step
         // arrives. Blocked on C3, which is part of WP-5.
         let is_idle = Arc::new(AtomicBool::new(false));
-        let parent_idle = Arc::new(Mutex::new(false));
-        let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));
         let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
-        let conn_parent_idle = parent_idle.clone();
-        let conn_active_subagents = active_subagent_ids.clone();
         let conn_step_trackers = step_trackers.clone();
 
         let tool_runner = self.tool_runner.clone();
@@ -679,32 +675,24 @@ impl WasmConnectionStrategy {
                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
-                                            let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
-                                            let learned_cascade = conn_cascade_id_for_ws.lock().await;
-                                            let is_subagent = learned_cascade.as_ref().is_some_and(|cid| !sub_id.is_empty() && sub_id != *cid);
-                                            tracing::debug!("TrajectoryStateUpdate: trajectory_id={:?}, state={:?}, is_subagent={}, learned_cascade_id={:?}", sub_id, tsu.state, is_subagent, *learned_cascade);
-                                            drop(learned_cascade);
+                                            let traj_id = tsu.trajectory_id.clone().unwrap_or_default();
+                                            let main_id = conn_cascade_id_for_ws.lock().await;
+                                            // Only the main trajectory drives idle; subagent
+                                            // trajectories return early (event_processor.py:539-542).
+                                            let is_main = main_id
+                                                .as_ref()
+                                                .is_none_or(|id| traj_id.is_empty() || traj_id == *id);
+                                            drop(main_id);
 
-                                            let mut active_subs = conn_active_subagents.lock().await;
-                                            let mut p_idle = conn_parent_idle.lock().await;
-
-                                            if tsu.state == Some(1) { // STATE_RUNNING
-                                                if is_subagent {
-                                                    active_subs.insert(sub_id);
-                                                }
-                                            } else if tsu.state == Some(2) { // STATE_FULLY_IDLE
-                                                if is_subagent {
-                                                    active_subs.remove(&sub_id);
-                                                } else {
-                                                    *p_idle = true;
-                                                }
+                                            if !is_main {
+                                                continue;
                                             }
 
-                                            tracing::debug!("TrajectoryStateUpdate: p_idle={}, active_subs_empty={}", *p_idle, active_subs.is_empty());
-                                            if *p_idle && active_subs.is_empty() && !conn_is_idle.swap(true, Ordering::SeqCst) {
+                                            if tsu.state == Some(2) { // STATE_FULLY_IDLE
+                                                conn_is_idle.store(true, Ordering::SeqCst);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
                                                 let sentinel = Step {
-                                                    id: "IDLE_SENTINEL".to_string(),
+                                                    id: crate::step_extract::IDLE_SENTINEL_ID.to_string(),
                                                     ..Default::default()
                                                 };
                                                 let _ = step_tx.send(Ok(sentinel));
@@ -935,8 +923,6 @@ impl WasmConnectionStrategy {
             ws_tx,
             tool_runner: self.tool_runner.clone(),
             hook_runner: self.hook_runner.clone(),
-            parent_idle,
-            active_subagent_ids,
             step_trackers,
         })
     }
@@ -953,8 +939,6 @@ pub struct WasmConnection {
     ws_tx: mpsc::UnboundedSender<String>,
     tool_runner: Option<ToolRunner>,
     hook_runner: Option<HookRunner>,
-    parent_idle: Arc<Mutex<bool>>,
-    active_subagent_ids: Arc<Mutex<HashSet<String>>>,
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
 }
 
@@ -974,63 +958,34 @@ impl Connection for WasmConnection {
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold(false, move |mut checked_initial_idle| {
+        stream::unfold((), move |()| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
-                // If the connection is already idle on the first poll and the queue is empty, terminate.
-                if !checked_initial_idle {
-                    checked_initial_idle = true;
-                    let mut guard = step_rx.lock().await;
-                    if guard
-                        .as_mut()
-                        .is_some_and(|rx| rx.is_empty() && is_idle.load(Ordering::SeqCst))
-                    {
-                        return None;
-                    }
-                }
-
                 loop {
+                    // Head condition, upstream local_connection.py:339-341: the
+                    // stream ends only when the connection is idle AND nothing
+                    // is queued behind the idle event. Returning on the idle
+                    // event itself drops every step queued after it.
                     let mut guard = step_rx.lock().await;
                     let Some(rx) = &mut *guard else {
+                        drop(guard);
                         return None;
                     };
-                    match rx.try_recv() {
-                        Ok(step_res) => match &step_res {
-                            Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                if is_idle.load(Ordering::SeqCst) {
-                                    return None;
-                                }
-                            }
-                            _ => {
-                                return Some((step_res, checked_initial_idle));
-                            }
-                        },
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            drop(guard);
-                            let mut guard2 = step_rx.lock().await;
-                            let Some(rx2) = &mut *guard2 else {
-                                return None;
-                            };
-                            let step_res = rx2.recv().await;
-                            drop(guard2);
-                            match step_res {
-                                Some(res) => match &res {
-                                    Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                        if is_idle.load(Ordering::SeqCst) {
-                                            return None;
-                                        }
-                                    }
-                                    _ => {
-                                        return Some((res, checked_initial_idle));
-                                    }
-                                },
-                                None => return None,
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            return None;
-                        }
+                    if is_idle.load(Ordering::SeqCst) && rx.is_empty() {
+                        drop(guard);
+                        return None;
+                    }
+                    let received = rx.recv().await;
+                    drop(guard);
+
+                    match received {
+                        None => return None,
+                        // Falls through to re-evaluate the head condition
+                        // rather than ending the stream: more steps may already
+                        // be queued behind the idle marker.
+                        Some(Ok(step)) if step.id == crate::step_extract::IDLE_SENTINEL_ID => {}
+                        Some(other) => return Some((other, ())),
                     }
                 }
             }
@@ -1040,14 +995,6 @@ impl Connection for WasmConnection {
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
         self.is_idle.store(false, Ordering::SeqCst);
-        {
-            let mut p_idle = self.parent_idle.lock().await;
-            *p_idle = false;
-        }
-        {
-            let mut active = self.active_subagent_ids.lock().await;
-            active.clear();
-        }
         {
             let mut guard = self.step_rx.lock().await;
             if let Some(rx) = &mut *guard {

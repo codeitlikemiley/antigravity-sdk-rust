@@ -114,63 +114,34 @@ impl Connection for LocalConnection {
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold(false, move |mut checked_initial_idle| {
+        stream::unfold((), move |()| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
-                // If the connection is already idle on the first poll and the queue is empty, terminate.
-                if !checked_initial_idle {
-                    checked_initial_idle = true;
-                    let mut guard = step_rx.lock().await;
-                    if guard
-                        .as_mut()
-                        .is_some_and(|rx| rx.is_empty() && is_idle.load(Ordering::SeqCst))
-                    {
-                        return None;
-                    }
-                }
-
                 loop {
+                    // Head condition, upstream local_connection.py:339-341: the
+                    // stream ends only when the connection is idle AND nothing
+                    // is queued behind the idle event. Returning on the idle
+                    // event itself drops every step queued after it.
                     let mut guard = step_rx.lock().await;
                     let Some(rx) = &mut *guard else {
+                        drop(guard);
                         return None;
                     };
-                    match rx.try_recv() {
-                        Ok(step_res) => match &step_res {
-                            Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                if is_idle.load(Ordering::SeqCst) {
-                                    return None;
-                                }
-                            }
-                            _ => {
-                                return Some((step_res, checked_initial_idle));
-                            }
-                        },
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            drop(guard);
-                            let mut guard2 = step_rx.lock().await;
-                            let Some(rx2) = &mut *guard2 else {
-                                return None;
-                            };
-                            let step_res = rx2.recv().await;
-                            drop(guard2);
-                            match step_res {
-                                Some(res) => match &res {
-                                    Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                        if is_idle.load(Ordering::SeqCst) {
-                                            return None;
-                                        }
-                                    }
-                                    _ => {
-                                        return Some((res, checked_initial_idle));
-                                    }
-                                },
-                                None => return None,
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            return None;
-                        }
+                    if is_idle.load(Ordering::SeqCst) && rx.is_empty() {
+                        drop(guard);
+                        return None;
+                    }
+                    let received = rx.recv().await;
+                    drop(guard);
+
+                    match received {
+                        None => return None,
+                        // Falls through to re-evaluate the head condition
+                        // rather than ending the stream: more steps may already
+                        // be queued behind the idle marker.
+                        Some(Ok(step)) if step.id == crate::step_extract::IDLE_SENTINEL_ID => {}
+                        Some(other) => return Some((other, ())),
                     }
                 }
             }
@@ -1164,10 +1135,11 @@ impl LocalConnectionStrategy {
                                                 continue;
                                             }
 
-                                            if tsu.state == Some(2) && !conn_is_idle.swap(true, Ordering::SeqCst) { // STATE_FULLY_IDLE
+                                            if tsu.state == Some(2) { // STATE_FULLY_IDLE
+                                                conn_is_idle.store(true, Ordering::SeqCst);
                                                 tracing::debug!("Connection transitioned to IDLE, sending sentinel");
                                                 let sentinel = Step {
-                                                    id: "IDLE_SENTINEL".to_string(),
+                                                    id: crate::step_extract::IDLE_SENTINEL_ID.to_string(),
                                                     ..Default::default()
                                                 };
                                                 let _ = step_tx.send(Ok(sentinel));
