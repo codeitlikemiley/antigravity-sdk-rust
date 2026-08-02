@@ -21,12 +21,12 @@ use crate::proto::localharness::{
     ClientInfo as ProtoClientInfo, FileEditToolConfig, FilesystemWorkspace, FindToolConfig,
     GenerateImageToolConfig, GrepSearchToolConfig, HarnessConfig, HarnessSideTools,
     InitializeConversationEvent, InputConfig, InputEvent, ListDirToolConfig, MultipleChoiceAnswer,
-    OutputConfig, OutputEvent, RunCommandToolConfig, SubagentsConfig,
-    SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
-    UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse, ViewFileToolConfig,
-    Workspace as ProtoWorkspace, WriteToFileToolConfig, appended_system_instructions::Section,
-    custom_system_instructions::Part, user_questions_response::QuestionsResponse,
-    workspace::WorkspaceType,
+    OutputConfig, OutputEvent, ReadUrlContentToolConfig, RunCommandToolConfig, SearchWebToolConfig,
+    SubagentsConfig, SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool,
+    ToolConfirmation, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
+    ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
+    appended_system_instructions::Section, custom_system_instructions::Part,
+    user_questions_response::QuestionsResponse, workspace::WorkspaceType,
 };
 use crate::tools::ToolRunner;
 use crate::types::{
@@ -428,6 +428,10 @@ pub struct LocalConnectionStrategy {
     pub session_continuation_mode: Option<crate::types::SessionContinuationMode>,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Named subagents, emitted on `HarnessConfig.custom_subagents`.
+    ///
+    /// Not a field of [`new`](Self::new) — set it on the struct.
+    pub subagents: Vec<crate::types::SubagentConfig>,
     /// Extra environment for the harness process, sent on `InputConfig.env`.
     ///
     /// Not a field of [`new`](Self::new) — set it on the struct. The harness
@@ -465,6 +469,7 @@ impl LocalConnectionStrategy {
             conversation_id,
             session_continuation_mode,
             mcp_servers,
+            subagents: Vec::new(),
             env: HashMap::new(),
         }
     }
@@ -640,9 +645,11 @@ impl LocalConnectionStrategy {
 
         // 4. Build HarnessConfig proto
         let mut proto_tools = Vec::new();
+        let mut registered_tool_names: Vec<String> = Vec::new();
         if let Some(ref runner) = self.tool_runner {
             let tools = runner.tools.read().await;
             for t in tools.iter() {
+                registered_tool_names.push(t.name().to_string());
                 proto_tools.push(ProtoTool {
                     name: Some(t.name().to_string()),
                     description: Some(t.description().to_string()),
@@ -737,9 +744,15 @@ impl LocalConnectionStrategy {
             );
 
         let side_tools = HarnessSideTools {
-            // Enabling these is WP-9; absent means the harness default.
-            search_web: None,
-            read_url_content: None,
+            // A tool like any other: absent would leave the harness to guess,
+            // and a caller who listed `enabled_tools` had no way to turn either
+            // on or off (C6).
+            search_web: Some(SearchWebToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::SearchWeb)),
+            }),
+            read_url_content: Some(ReadUrlContentToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::ReadUrlContent)),
+            }),
             tool_search_config: None,
             find: Some(FindToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::FindFile)),
@@ -787,7 +800,10 @@ impl LocalConnectionStrategy {
                 .map(crate::types::SessionContinuationMode::as_proto),
             retry_config: None,
             enabled_hooks: Vec::new(),
-            custom_subagents: Vec::new(),
+            custom_subagents: crate::harness_config::build_custom_subagents_proto(
+                &self.subagents,
+                &registered_tool_names,
+            )?,
             mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
             tool_output_truncation: None,
             models: crate::harness_config::build_models_proto(

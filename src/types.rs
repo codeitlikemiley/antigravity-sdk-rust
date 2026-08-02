@@ -309,6 +309,46 @@ pub struct GeminiConfig {
     pub enable_url_context: Option<bool>,
 }
 
+/// What a named subagent may do.
+///
+/// Mirrors upstream `SubagentCapabilities` (`types.py:785-802`). The two lists
+/// are mutually exclusive — supplying both is a configuration error, not a
+/// silent precedence rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubagentCapabilities {
+    /// Built-ins the subagent may use. Defaults to
+    /// [`BuiltinTools::read_only`] when neither list is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<BuiltinTools>>,
+    /// Built-ins the subagent may not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_tools: Option<Vec<BuiltinTools>>,
+}
+
+/// A named subagent the model can delegate to.
+///
+/// Mirrors upstream `SubagentConfig` (`types.py:804-834`), emitted on
+/// `HarnessConfig.custom_subagents` (field 17).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    /// How the model refers to this subagent.
+    pub name: String,
+    /// What it is for. The model reads this to decide when to delegate.
+    pub description: String,
+    /// Instructions scoped to this subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_instructions: Option<String>,
+    /// Which built-ins it may use.
+    #[serde(default)]
+    pub capabilities: SubagentCapabilities,
+    /// Names of client-side tools it may call.
+    ///
+    /// Each must be registered on the main agent — a subagent cannot call a
+    /// tool that does not exist.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
 /// A structured section appended to system instructions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInstructionSection {
@@ -379,6 +419,12 @@ pub enum BuiltinTools {
     /// Tool to put a multiple-choice question to the user.
     #[serde(rename = "ASK_QUESTION")]
     AskQuestion,
+    /// Tool to search the web (harness-side, added upstream in 0.1.6).
+    #[serde(rename = "SEARCH_WEB")]
+    SearchWeb,
+    /// Tool to fetch and summarize a URL (harness-side, added upstream in 0.1.6).
+    #[serde(rename = "READ_URL_CONTENT")]
+    ReadUrlContent,
     /// Terminating signal indicating the task is completed.
     #[serde(rename = "FINISH")]
     Finish,
@@ -398,6 +444,8 @@ impl BuiltinTools {
             Self::StartSubagent => "START_SUBAGENT",
             Self::GenerateImage => "GENERATE_IMAGE",
             Self::AskQuestion => "ASK_QUESTION",
+            Self::SearchWeb => "SEARCH_WEB",
+            Self::ReadUrlContent => "READ_URL_CONTENT",
             Self::Finish => "FINISH",
         }
     }
@@ -414,6 +462,9 @@ impl BuiltinTools {
             Self::SearchDir,
             Self::FindFile,
             Self::ViewFile,
+            // Added to upstream's read_only() in 0.1.6: fetching a URL reads,
+            // it does not write.
+            Self::ReadUrlContent,
             Self::Finish,
         ]
     }
@@ -435,6 +486,8 @@ impl BuiltinTools {
             Self::StartSubagent,
             Self::GenerateImage,
             Self::AskQuestion,
+            Self::SearchWeb,
+            Self::ReadUrlContent,
             Self::Finish,
         ]
     }

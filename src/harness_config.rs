@@ -548,3 +548,225 @@ mod mcp_tests {
         }
     }
 }
+
+/// Builds `HarnessConfig.custom_subagents` (field 17).
+///
+/// Ports upstream's three validations (`local_connection.py:884-936`):
+///
+/// 1. capabilities default to [`BuiltinTools::read_only`] when neither list is
+///    given — a subagent that inherits everything is not what "default" should
+///    mean;
+/// 2. `START_SUBAGENT` is dropped with a warning, because a subagent spawning
+///    subagents is not supported by the harness;
+/// 3. naming a client-side tool the main agent has not registered is an error,
+///    not a subagent that silently cannot call it.
+///
+/// # Errors
+///
+/// Returns an error if both capability lists are set on one subagent, or if a
+/// named tool is not registered.
+pub fn build_custom_subagents_proto(
+    subagents: &[crate::types::SubagentConfig],
+    registered_tools: &[String],
+) -> Result<Vec<crate::proto::localharness::CustomAgent>, anyhow::Error> {
+    use crate::proto::localharness::{CustomAgent, SystemInstructions as ProtoSystem};
+    use crate::types::BuiltinTools;
+
+    let mut built = Vec::with_capacity(subagents.len());
+    for subagent in subagents {
+        let capabilities = &subagent.capabilities;
+        if capabilities.enabled_tools.is_some() && capabilities.disabled_tools.is_some() {
+            return Err(anyhow::anyhow!(
+                "subagent `{}` sets both enabled_tools and disabled_tools; they are mutually \
+                 exclusive",
+                subagent.name
+            ));
+        }
+
+        let mut tools: Vec<BuiltinTools> =
+            match (&capabilities.enabled_tools, &capabilities.disabled_tools) {
+                (Some(enabled), _) => enabled.clone(),
+                (None, Some(disabled)) => BuiltinTools::all_tools()
+                    .into_iter()
+                    .filter(|t| !disabled.contains(t))
+                    .collect(),
+                (None, None) => BuiltinTools::read_only(),
+            };
+
+        if tools.contains(&BuiltinTools::StartSubagent) {
+            tracing::warn!(
+                "subagent `{}` requested START_SUBAGENT; nested subagents are not supported and \
+                 the tool has been dropped",
+                subagent.name
+            );
+            tools.retain(|t| *t != BuiltinTools::StartSubagent);
+        }
+
+        for tool in &subagent.tools {
+            if !registered_tools.iter().any(|name| name == tool) {
+                return Err(anyhow::anyhow!(
+                    "subagent `{}` names the tool `{tool}`, which is not registered on the agent",
+                    subagent.name
+                ));
+            }
+        }
+
+        built.push(CustomAgent {
+            name: Some(subagent.name.clone()),
+            description: Some(subagent.description.clone()),
+            system_instructions: subagent.system_instructions.as_ref().map(|text| ProtoSystem {
+                r#type: Some(
+                    crate::proto::localharness::system_instructions::Type::Custom(
+                        crate::proto::localharness::CustomSystemInstructions {
+                            part: vec![crate::proto::localharness::custom_system_instructions::Part {
+                                part: Some(
+                                    crate::proto::localharness::custom_system_instructions::part::Part::Text(text.clone()),
+                                ),
+                            }],
+                        },
+                    ),
+                ),
+            }),
+            harness_side_tools: Some(harness_side_tools_for(&tools)),
+            // Client-side tools are declared once on the main agent; the
+            // harness routes a subagent's call back through the same channel.
+            tools: Vec::new(),
+        });
+    }
+    Ok(built)
+}
+
+/// The `HarnessSideTools` toggles for a given set of built-ins.
+///
+/// `subagents` is always off here: nested subagents are not supported, which is
+/// validation 2 of [`build_custom_subagents_proto`] expressed on the wire.
+fn harness_side_tools_for(
+    tools: &[crate::types::BuiltinTools],
+) -> crate::proto::localharness::HarnessSideTools {
+    use crate::proto::localharness::{
+        FileEditToolConfig, FindToolConfig, GenerateImageToolConfig, GrepSearchToolConfig,
+        HarnessSideTools, ListDirToolConfig, ReadUrlContentToolConfig, RunCommandToolConfig,
+        SearchWebToolConfig, SubagentsConfig, UserQuestionsConfig, ViewFileToolConfig,
+        WriteToFileToolConfig,
+    };
+    use crate::types::BuiltinTools;
+
+    let on = |tool: BuiltinTools| Some(tools.contains(&tool));
+
+    HarnessSideTools {
+        find: Some(FindToolConfig {
+            enabled: on(BuiltinTools::FindFile),
+        }),
+        run_command: Some(RunCommandToolConfig {
+            enabled: on(BuiltinTools::RunCommand),
+        }),
+        subagents: Some(SubagentsConfig {
+            enabled: Some(false),
+        }),
+        user_questions: Some(UserQuestionsConfig {
+            enabled: on(BuiltinTools::AskQuestion),
+        }),
+        file_edit: Some(FileEditToolConfig {
+            enabled: on(BuiltinTools::EditFile),
+        }),
+        view_file: Some(ViewFileToolConfig {
+            enabled: on(BuiltinTools::ViewFile),
+        }),
+        write_to_file: Some(WriteToFileToolConfig {
+            enabled: on(BuiltinTools::CreateFile),
+        }),
+        grep_search: Some(GrepSearchToolConfig {
+            enabled: on(BuiltinTools::SearchDir),
+        }),
+        list_dir: Some(ListDirToolConfig {
+            enabled: on(BuiltinTools::ListDir),
+        }),
+        permissions: None,
+        generate_image: Some(GenerateImageToolConfig {
+            enabled: on(BuiltinTools::GenerateImage),
+        }),
+        search_web: Some(SearchWebToolConfig {
+            enabled: on(BuiltinTools::SearchWeb),
+        }),
+        read_url_content: Some(ReadUrlContentToolConfig {
+            enabled: on(BuiltinTools::ReadUrlContent),
+        }),
+        tool_search_config: None,
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::build_custom_subagents_proto;
+    use crate::types::{BuiltinTools, SubagentCapabilities, SubagentConfig};
+
+    fn reviewer() -> SubagentConfig {
+        SubagentConfig {
+            name: "reviewer".to_string(),
+            description: "reviews a diff".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Capabilities default to the read-only built-ins. A subagent that
+    /// inherited everything is not what "default" should mean.
+    #[test]
+    fn capabilities_default_to_read_only() {
+        let built = build_custom_subagents_proto(&[reviewer()], &[]).unwrap();
+        let tools = built[0].harness_side_tools.as_ref().unwrap();
+        assert_eq!(tools.view_file.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(tools.run_command.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(tools.file_edit.as_ref().unwrap().enabled, Some(false));
+    }
+
+    /// A subagent spawning subagents is not supported by the harness.
+    #[test]
+    fn start_subagent_is_dropped() {
+        let mut subagent = reviewer();
+        subagent.capabilities = SubagentCapabilities {
+            enabled_tools: Some(vec![BuiltinTools::StartSubagent, BuiltinTools::ViewFile]),
+            disabled_tools: None,
+        };
+        let built = build_custom_subagents_proto(&[subagent], &[]).unwrap();
+        let tools = built[0].harness_side_tools.as_ref().unwrap();
+        assert_eq!(tools.subagents.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(tools.view_file.as_ref().unwrap().enabled, Some(true));
+    }
+
+    #[test]
+    fn both_capability_lists_is_an_error() {
+        let mut subagent = reviewer();
+        subagent.capabilities = SubagentCapabilities {
+            enabled_tools: Some(vec![BuiltinTools::ViewFile]),
+            disabled_tools: Some(vec![BuiltinTools::RunCommand]),
+        };
+        let err = build_custom_subagents_proto(&[subagent], &[]).expect_err("mutually exclusive");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    /// A subagent cannot call a tool that does not exist.
+    #[test]
+    fn an_unregistered_tool_is_an_error() {
+        let mut subagent = reviewer();
+        subagent.tools = vec!["lookup".to_string()];
+        let err = build_custom_subagents_proto(&[subagent.clone()], &[]).expect_err("unregistered");
+        assert!(err.to_string().contains("not registered"), "{err}");
+
+        // Registered on the agent: fine.
+        assert!(build_custom_subagents_proto(&[subagent], &["lookup".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_disabled_list_subtracts_from_all_tools() {
+        let mut subagent = reviewer();
+        subagent.capabilities = SubagentCapabilities {
+            enabled_tools: None,
+            disabled_tools: Some(vec![BuiltinTools::RunCommand]),
+        };
+        let built = build_custom_subagents_proto(&[subagent], &[]).unwrap();
+        let tools = built[0].harness_side_tools.as_ref().unwrap();
+        assert_eq!(tools.run_command.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(tools.file_edit.as_ref().unwrap().enabled, Some(true));
+    }
+}

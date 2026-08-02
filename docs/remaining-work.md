@@ -176,7 +176,7 @@ nothing caught the missing `src/wasm.rs` half. CI now compiles the wasm target,
 the doctests and the three directory examples — it found a genuine wasm-only
 break on its first run.
 
-### Phase C — capability surface
+### Phase C — capability surface — **complete**
 
 | # | Batch | Items | Size |
 |---|---|---|---|
@@ -185,8 +185,8 @@ break on its first run.
 | ~~C3~~ | Model environment — **done**. `GOOGLE_GENAI_USE_VERTEXAI`/`_USE_ENTERPRISE` select Vertex, `GOOGLE_CLOUD_PROJECT`/`_LOCATION` hydrate it, and an env-only key stays off the wire | S |
 | ~~C4~~ | MCP on the wire — **done**. `mcp_server(...)` was a no-op: the builder accepted servers, both strategies stored them, and nothing emitted them, so the model never saw an MCP tool | M |
 | C5 | Retry + truncation | `RetryConfig`, `ToolOutputTruncation` | S |
-| C6 | New built-ins | `search_web`, `read_url_content` configs and their step actions | M |
-| C7 | Subagents | `SubagentConfig` / `SubagentCapabilities` → `custom_subagents` field 17, with upstream's three validations | L |
+| ~~C6~~ | New built-ins — **done**. `SEARCH_WEB`/`READ_URL_CONTENT` are `BuiltinTools`, gate their harness configs, and classify as tool calls so policies see them. `read_only()` gains `READ_URL_CONTENT`, matching upstream 0.1.6 | M |
+| ~~C7~~ | Subagents — **done**, with all three validations: read-only default capabilities, `START_SUBAGENT` dropped with a warning, and an unregistered tool name is an error | L |
 
 ### Phase D — the breaking release (0.2.0) — **complete**
 

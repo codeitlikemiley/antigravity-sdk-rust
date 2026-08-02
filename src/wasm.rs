@@ -25,9 +25,10 @@ use crate::hooks::HookRunner;
 use crate::proto::localharness::{
     FileEditToolConfig, FilesystemWorkspace, FindToolConfig, GenerateImageToolConfig,
     GrepSearchToolConfig, HarnessConfig, HarnessSideTools, InitializeConversationEvent, InputEvent,
-    ListDirToolConfig, MultipleChoiceAnswer, OutputEvent, RunCommandToolConfig, StepUpdate,
-    SubagentsConfig, SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool,
-    ToolConfirmation, ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
+    ListDirToolConfig, MultipleChoiceAnswer, OutputEvent, ReadUrlContentToolConfig,
+    RunCommandToolConfig, SearchWebToolConfig, StepUpdate, SubagentsConfig,
+    SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
+    ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
     ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
     appended_system_instructions::Section, custom_system_instructions::Part,
     user_questions_response::QuestionsResponse, workspace::WorkspaceType,
@@ -88,6 +89,8 @@ pub struct WasmConnectionStrategy {
     pub conversation_id: String,
     /// MCP server configurations, emitted on `HarnessConfig.mcp_servers`.
     pub mcp_servers: Vec<crate::types::McpServerConfig>,
+    /// Named subagents, emitted on `HarnessConfig.custom_subagents`.
+    pub subagents: Vec<crate::types::SubagentConfig>,
 }
 
 impl WasmConnectionStrategy {
@@ -153,9 +156,11 @@ impl WasmConnectionStrategy {
 
         // Build HarnessConfig proto
         let mut proto_tools = Vec::new();
+        let mut registered_tool_names: Vec<String> = Vec::new();
         if let Some(ref runner) = self.tool_runner {
             let tools = runner.tools.read().await;
             for t in tools.iter() {
+                registered_tool_names.push(t.name().to_string());
                 proto_tools.push(ProtoTool {
                     name: Some(t.name().to_string()),
                     description: Some(t.description().to_string()),
@@ -250,9 +255,15 @@ impl WasmConnectionStrategy {
             );
 
         let side_tools = HarnessSideTools {
-            // Enabling these is WP-9; absent means the harness default.
-            search_web: None,
-            read_url_content: None,
+            // A tool like any other: absent would leave the harness to guess,
+            // and a caller who listed `enabled_tools` had no way to turn either
+            // on or off (C6).
+            search_web: Some(SearchWebToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::SearchWeb)),
+            }),
+            read_url_content: Some(ReadUrlContentToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::ReadUrlContent)),
+            }),
             tool_search_config: None,
             find: Some(FindToolConfig {
                 enabled: Some(active_tools.contains(&BuiltinTools::FindFile)),
@@ -298,7 +309,10 @@ impl WasmConnectionStrategy {
             session_continuation_mode: None,
             retry_config: None,
             enabled_hooks: Vec::new(),
-            custom_subagents: Vec::new(),
+            custom_subagents: crate::harness_config::build_custom_subagents_proto(
+                &self.subagents,
+                &registered_tool_names,
+            )?,
             mcp_servers: crate::harness_config::build_mcp_servers_proto(&self.mcp_servers),
             tool_output_truncation: None,
             models: crate::harness_config::build_models_proto(
@@ -1740,6 +1754,7 @@ mod tests {
             hook_runner: None,
             conversation_id: "test_traj".to_string(),
             mcp_servers: Vec::new(),
+            subagents: Vec::new(),
         };
 
         // Connect

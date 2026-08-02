@@ -186,6 +186,8 @@ The SDK provides these built-in tools (managed by the harness):
 | `GenerateImage` | Generate images |
 | `Finish` | Signal task completion |
 | `AskQuestion` | Put a multiple-choice question to the user |
+| `SearchWeb` | Search the web (harness-side) |
+| `ReadUrlContent` | Fetch and summarize a URL (harness-side) |
 | `GrepSearch` | Grep-based search |
 
 ### Read-Only Tools
@@ -292,3 +294,18 @@ text.
 Only unambiguous conversions are made. `"not a number"` for an `integer` is
 passed through untouched, so a genuine type error still surfaces as one rather
 than being papered over.
+
+## Named subagents
+
+`AgentBuilder::subagent(...)` declares a subagent the model can delegate to.
+Three rules are enforced when the config is built, matching upstream:
+
+- Capabilities default to the **read-only** built-ins. A subagent that inherited
+  everything is not what "default" should mean.
+- `START_SUBAGENT` is dropped with a warning: the harness does not support a
+  subagent spawning subagents.
+- Naming a client-side tool that is not registered on the main agent is an
+  error, not a subagent that silently cannot call it.
+
+`enabled_tools` and `disabled_tools` are mutually exclusive; setting both is a
+configuration error rather than a silent precedence rule.

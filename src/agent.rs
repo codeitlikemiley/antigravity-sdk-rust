@@ -57,6 +57,11 @@ pub struct AgentConfig {
     pub response_schema: Option<String>,
     /// MCP server configurations to connect to external tool servers.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Named subagents the model can delegate to.
+    ///
+    /// Each one's capabilities default to the read-only built-ins, and every
+    /// client-side tool it names must be registered on this agent.
+    pub subagents: Vec<crate::types::SubagentConfig>,
     /// How the conversation attaches to harness-side session state.
     ///
     /// Leave unset for a new conversation. Set `CreateOrResume` when supplying
@@ -84,6 +89,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("app_data_dir", &self.app_data_dir)
             .field("response_schema", &self.response_schema)
             .field("mcp_servers", &self.mcp_servers)
+            .field("subagents", &self.subagents)
             .field("session_continuation_mode", &self.session_continuation_mode)
             .finish()
     }
@@ -353,6 +359,7 @@ impl Agent<Unstarted> {
                     hook_runner: Some(self.hook_runner.clone()),
                     conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
                     mcp_servers: self.config.mcp_servers.clone(),
+                    subagents: self.config.subagents.clone(),
                 };
 
                 let conn = strategy.connect().await?;
@@ -408,6 +415,7 @@ impl Agent<Unstarted> {
                 );
                 let strategy = LocalConnectionStrategy {
                     env: self.config.env.clone(),
+                    subagents: self.config.subagents.clone(),
                     ..strategy
                 };
 
@@ -556,6 +564,18 @@ impl<P> AgentBuilder<P> {
 
     pub fn system_instructions(mut self, system_instructions: SystemInstructions) -> Self {
         self.config.system_instructions = Some(system_instructions);
+        self
+    }
+
+    /// Declares a named subagent the model can delegate to.
+    pub fn subagent(mut self, subagent: crate::types::SubagentConfig) -> Self {
+        self.config.subagents.push(subagent);
+        self
+    }
+
+    /// Replaces the declared subagents.
+    pub fn subagents(mut self, subagents: Vec<crate::types::SubagentConfig>) -> Self {
+        self.config.subagents = subagents;
         self
     }
 

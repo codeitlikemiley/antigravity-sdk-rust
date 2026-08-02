@@ -114,6 +114,21 @@ pub fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
                 "directory_path": list.directory_path,
             }),
         )
+    } else if let Some(ref search) = step_update.search_web {
+        (
+            "SEARCH_WEB",
+            serde_json::json!({
+                "query": search.query,
+                "domain": search.domain,
+            }),
+        )
+    } else if let Some(ref read) = step_update.read_url_content {
+        (
+            "READ_URL_CONTENT",
+            serde_json::json!({
+                "url": read.url,
+            }),
+        )
     } else if let Some(ref finish) = step_update.finish {
         // FINISH is a built-in like any other upstream
         // (`_BUILTIN_TOOL_PROTO_FIELDS`), and leaving it out meant the one call
