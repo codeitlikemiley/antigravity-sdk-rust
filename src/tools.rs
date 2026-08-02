@@ -215,15 +215,19 @@ impl ToolRunner {
                         exception: None,
                     };
                 };
+                // The model's arguments are shaped to the tool's own schema
+                // before it sees them, so `"3"` for an integer is not reported
+                // to the model as the tool being broken.
+                let call_args = crate::coerce::coerced(call.args, tool.parameters_json_schema());
                 let outcome = match (tool.needs_context(), context.as_ref()) {
-                    (true, Some(ctx)) => tool.call_with_context(call.args, ctx).await,
+                    (true, Some(ctx)) => tool.call_with_context(call_args, ctx).await,
                     // A tool that asks for a context and finds none would
                     // otherwise run without it and behave subtly differently.
                     (true, None) => Err(anyhow::anyhow!(
                         "`{}` requires a ToolContext and none is attached",
                         call.name
                     )),
-                    (false, _) => tool.call(call.args).await,
+                    (false, _) => tool.call(call_args).await,
                 };
                 match outcome {
                     Ok(val) => crate::types::ToolResult {

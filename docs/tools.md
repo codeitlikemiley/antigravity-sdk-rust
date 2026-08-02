@@ -280,3 +280,15 @@ model is shown, and `exception` is the same failure as a
 `ToolExecutionError { message, tool_name, server_name }` for hooks that route
 or count failures. `server_name` is `None` for built-ins and client-side Rust
 tools, and set for MCP tools — the name alone is ambiguous across servers.
+
+## Arguments are coerced to your schema
+
+Models routinely send `"3"` where a schema says `integer`, or `"true"` for a
+boolean. Those are converted against the tool's own
+`parameters_json_schema()` before the tool sees them, including inside arrays
+and nested objects, and including a whole array or object that arrived as JSON
+text.
+
+Only unambiguous conversions are made. `"not a number"` for an `integer` is
+passed through untouched, so a genuine type error still surfaces as one rather
+than being papered over.

@@ -60,6 +60,7 @@ pub mod proto {
 }
 
 pub mod agent;
+pub mod coerce;
 pub mod connection;
 pub mod context;
 pub mod conversation;
