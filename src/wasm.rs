@@ -225,7 +225,10 @@ impl WasmConnectionStrategy {
         for w in &self.workspaces {
             proto_workspaces.push(ProtoWorkspace {
                 workspace_type: Some(WorkspaceType::FilesystemWorkspace(FilesystemWorkspace {
-                    directory: Some(w.clone()),
+                    // Upstream normalizes on the way out (0.1.1
+                    // local_connection.py:1418), so the harness and the client-side
+                    // policy layer scope the same directories.
+                    directory: Some(crate::wire_path::normalize_wire_path(w)),
                 })),
             });
         }
@@ -444,7 +447,7 @@ impl WasmConnectionStrategy {
                                             };
 
                                             let mut tool_calls = Vec::new();
-                                            if let Some(tc) = extract_builtin_tool_call(&step_update) {
+                                            if let Some(tc) = crate::step_extract::extract_builtin_tool_call(&step_update) {
                                                 tool_calls.push(tc);
                                             }
 
@@ -642,7 +645,7 @@ impl WasmConnectionStrategy {
                                                 let pending_calls = pending_builtin_tool_calls.clone();
                                                 crate::spawn_task(async move {
                                                     let mut allow = true;
-                                                    let tool_call = extract_builtin_tool_call(&step_update_clone);
+                                                    let tool_call = crate::step_extract::extract_builtin_tool_call(&step_update_clone);
                                                     if let Some(ref tc) = tool_call {
                                                         if let Some(ref runner) = hook_runner {
                                                             let pre_call = runner.dispatch_pre_tool_call(tc).await;
@@ -1161,126 +1164,12 @@ impl Connection for WasmConnection {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
-    let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
-    let step_idx = step_update.step_index.unwrap_or(0);
-    let id = format!("{traj_id}_{step_idx}");
-
-    if step_update.invoke_subagent.is_some() {
-        return Some(ToolCall {
-            id,
-            name: "START_SUBAGENT".to_string(),
-            args: serde_json::json!({
-                "prompt": step_update.request_text.clone().unwrap_or_default()
-            }),
-            canonical_path: None,
-        });
-    }
-
-    if let Some(ref fd) = step_update.find_file {
-        return Some(ToolCall {
-            id,
-            name: "FIND_FILE".to_string(),
-            args: serde_json::json!({
-                "directory_path": fd.directory_path,
-                "query": fd.query,
-            }),
-            canonical_path: fd.directory_path.clone(),
-        });
-    }
-    if let Some(ref run) = step_update.run_command {
-        return Some(ToolCall {
-            id,
-            name: "RUN_COMMAND".to_string(),
-            args: serde_json::json!({
-                "command_line": run.command_line,
-                "working_dir": run.working_dir,
-            }),
-            canonical_path: None,
-        });
-    }
-    if let Some(ref view) = step_update.view_file {
-        return Some(ToolCall {
-            id,
-            name: "VIEW_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": view.file_path,
-                "start_line": view.start_line,
-                "end_line": view.end_line,
-            }),
-            canonical_path: view.file_path.clone(),
-        });
-    }
-    if let Some(ref write) = step_update.create_file {
-        return Some(ToolCall {
-            id,
-            name: "CREATE_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": write.file_path,
-                "contents": write.contents,
-            }),
-            canonical_path: write.file_path.clone(),
-        });
-    }
-    if let Some(ref edit) = step_update.edit_file {
-        return Some(ToolCall {
-            id,
-            name: "EDIT_FILE".to_string(),
-            args: serde_json::json!({
-                "file_path": edit.file_path,
-            }),
-            canonical_path: edit.file_path.clone(),
-        });
-    }
-    if let Some(ref search) = step_update.search_directory {
-        // The harness puts grep/search results into `step_update.text`.
-        // Pack them into `args.output` so the frontend can display them,
-        // mirroring how RUN_COMMAND packs `combined_output`.
-        return Some(ToolCall {
-            id,
-            name: "SEARCH_DIR".to_string(),
-            args: serde_json::json!({
-                "directory_path": search.directory_path,
-                "query": search.query,
-                "num_results": search.num_results,
-                // Actual grep results from the harness
-                "output": step_update.text,
-            }),
-            canonical_path: search.directory_path.clone(),
-        });
-    }
-    if let Some(ref list) = step_update.list_directory {
-        return Some(ToolCall {
-            id,
-            name: "LIST_DIR".to_string(),
-            args: serde_json::json!({
-                "directory_path": list.directory_path,
-            }),
-            canonical_path: list.directory_path.clone(),
-        });
-    }
-    if let Some(ref img_gen) = step_update.generate_image {
-        return Some(ToolCall {
-            id,
-            name: "GENERATE_IMAGE".to_string(),
-            args: serde_json::json!({
-                "prompt": img_gen.prompt,
-                "image_paths": img_gen.image_paths,
-                "image_name": img_gen.image_name,
-            }),
-            canonical_path: None,
-        });
-    }
-    None
-}
-
 fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
     let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
     let step_idx = step_update.step_index.unwrap_or(0);
     let id = format!("{traj_id}_{step_idx}");
 
-    let tool_call = extract_builtin_tool_call(step_update)?;
+    let tool_call = crate::step_extract::extract_builtin_tool_call(step_update)?;
     let result = step_update.text.clone().map(Value::String);
     let error = step_update.error_message.clone();
 
@@ -1338,7 +1227,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_find).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_find).unwrap();
         assert_eq!(tc.id, "traj_1_1");
         assert_eq!(tc.name, "FIND_FILE");
         assert_eq!(tc.canonical_path, Some("dir_path".to_string()));
@@ -1384,15 +1273,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_run).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_run).unwrap();
         assert_eq!(tc.id, "traj_1_2");
         assert_eq!(tc.name, "RUN_COMMAND");
         assert_eq!(tc.canonical_path, None);
+        // The execution-result fields are always present, `null` until the
+        // harness reports them. This assertion previously omitted them: the
+        // wasm extractor was a stale fork of the native one, and the two are
+        // now a single implementation in `crate::step_extract`.
         assert_eq!(
             tc.args,
             serde_json::json!({
                 "command_line": "echo hello",
-                "working_dir": "work_dir"
+                "working_dir": "work_dir",
+                "combined_output": null,
+                "exit_code": null
             })
         );
 
@@ -1407,7 +1302,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_view).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_view).unwrap();
         assert_eq!(tc.id, "traj_1_3");
         assert_eq!(tc.name, "VIEW_FILE");
         assert_eq!(tc.canonical_path, Some("view_path".to_string()));
@@ -1430,7 +1325,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_create).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_create).unwrap();
         assert_eq!(tc.id, "traj_1_4");
         assert_eq!(tc.name, "CREATE_FILE");
         assert_eq!(tc.canonical_path, Some("create_path".to_string()));
@@ -1452,7 +1347,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_edit).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_edit).unwrap();
         assert_eq!(tc.id, "traj_1_5");
         assert_eq!(tc.name, "EDIT_FILE");
         assert_eq!(tc.canonical_path, Some("edit_path".to_string()));
@@ -1471,7 +1366,7 @@ mod tests {
             request_text: Some("Do a subtask".to_string()),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_sub).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_sub).unwrap();
         assert_eq!(tc.id, "traj_1_6");
         assert_eq!(tc.name, "START_SUBAGENT");
         assert_eq!(tc.canonical_path, None);
@@ -1492,7 +1387,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_list).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_list).unwrap();
         assert_eq!(tc.id, "traj_1_8");
         assert_eq!(tc.name, "LIST_DIR");
         assert_eq!(tc.canonical_path, Some("list_path".to_string()));
@@ -1514,7 +1409,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let tc = extract_builtin_tool_call(&step_update_gen).unwrap();
+        let tc = crate::step_extract::extract_builtin_tool_call(&step_update_gen).unwrap();
         assert_eq!(tc.id, "traj_1_9");
         assert_eq!(tc.name, "GENERATE_IMAGE");
         assert_eq!(tc.canonical_path, None);
@@ -1528,7 +1423,7 @@ mod tests {
             step_index: Some(7),
             ..Default::default()
         };
-        assert!(extract_builtin_tool_call(&step_update_none).is_none());
+        assert!(crate::step_extract::extract_builtin_tool_call(&step_update_none).is_none());
         assert!(extract_tool_result(&step_update_none).is_none());
     }
 

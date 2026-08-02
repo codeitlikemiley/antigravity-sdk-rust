@@ -239,6 +239,13 @@ impl Agent<Unstarted> {
             let read_only = BuiltinTools::read_only();
             let has_write_tools = active_tools.iter().any(|t| !read_only.contains(t));
 
+            // Single resolution point for workspace roots: the client-side policy
+            // layer and the harness must be told about the same directories.
+            // Upstream local_connection_config.py:54 (default `[os.getcwd()]`),
+            // :144-150 (feeds the workspace policies) and :185 (passed to the
+            // strategy) all read the one field.
+            let workspaces = crate::workspace::resolve(self.config.workspaces.as_ref());
+
             // 4. Set up policies
             let mut final_policies = self.config.policies.clone().unwrap_or_else(|| {
                 // Default to confirm_run_command
@@ -259,27 +266,18 @@ impl Agent<Unstarted> {
                     && p.name == "allow_all"
             });
 
-            if !has_allow_all {
-                let workspaces = self.config.workspaces.clone().unwrap_or_else(|| {
-                    std::env::current_dir().map_or_else(
-                        |_| Vec::new(),
-                        |cwd| vec![cwd.to_string_lossy().into_owned()],
-                    )
-                });
-
-                if !workspaces.is_empty() {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                    let app_data_dir = self
-                        .config
-                        .app_data_dir
-                        .clone()
-                        .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
-                    let mut allowed_paths = workspaces;
-                    allowed_paths.push(app_data_dir);
-                    let mut ws_policies = policy::workspace_only(allowed_paths);
-                    ws_policies.append(&mut final_policies);
-                    final_policies = ws_policies;
-                }
+            if !has_allow_all && !workspaces.is_empty() {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                let app_data_dir = self
+                    .config
+                    .app_data_dir
+                    .clone()
+                    .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
+                let mut allowed_paths = workspaces.clone();
+                allowed_paths.push(app_data_dir);
+                let mut ws_policies = policy::workspace_only(allowed_paths);
+                ws_policies.append(&mut final_policies);
+                final_policies = ws_policies;
             }
 
             // Safety policy check: if write tools are enabled, policies cannot be empty
@@ -312,7 +310,7 @@ impl Agent<Unstarted> {
                     capabilities_config: cap,
                     system_instructions: self.config.system_instructions.clone(),
                     save_dir: self.config.save_dir.clone(),
-                    workspaces: self.config.workspaces.clone().unwrap_or_default(),
+                    workspaces: workspaces.clone(),
                     skills_paths: self.config.skills_paths.clone(),
                     tool_runner: Some(self.tool_runner.clone()),
                     hook_runner: Some(self.hook_runner.clone()),
@@ -357,7 +355,7 @@ impl Agent<Unstarted> {
                     cap,
                     self.config.system_instructions.clone(),
                     self.config.save_dir.clone(),
-                    self.config.workspaces.clone().unwrap_or_default(),
+                    workspaces.clone(),
                     self.config.skills_paths.clone(),
                     Some(self.tool_runner.clone()),
                     Some(self.hook_runner.clone()),

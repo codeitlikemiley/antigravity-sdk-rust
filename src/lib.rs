@@ -71,11 +71,14 @@ pub mod local;
 pub mod wasm;
 
 pub mod policy;
+pub mod step_extract;
 pub mod tool_context;
 pub mod tools;
 pub mod trigger_helpers;
 pub mod triggers;
 pub mod types;
+pub mod wire_path;
+pub mod workspace;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod interactive;
