@@ -247,54 +247,11 @@ impl Agent<Unstarted> {
             let workspaces = crate::workspace::resolve(self.config.workspaces.as_ref());
 
             // 4. Set up policies
-            let mut final_policies = self.config.policies.clone().unwrap_or_else(|| {
-                // Default to confirm_run_command
-                policy::confirm_run_command(None)
-            });
-
-            // Workspace scoping is applied unconditionally, matching upstream's
-            // model-validator (local_connection_config.py:130-141 at 0.1.1,
-            // :112-133 at 0.1.9). It used to be skipped whenever the policy set
-            // contained `allow_all()` — which is what the README, the crate docs
-            // and every example recommend — so the default posture was less
-            // sandboxed than upstream's. Upstream documents `allow_all()` as the
-            // way to get autonomous shell access *while* file tools stay scoped;
-            // the opt-out is `workspaces(vec![])`, not a policy name.
-            //
-            // Drop any workspace_only policies already present first, so
-            // re-application cannot stack duplicate DENY rules (0.1.9 :114-118).
-            // This runs unconditionally, so `workspaces(vec![])` also strips a
-            // hand-passed workspace_only group — upstream's semantics.
-            final_policies.retain(|p| p.name != "workspace_only");
-
-            if !workspaces.is_empty() {
-                let app_data_dir = match self.config.app_data_dir.clone() {
-                    Some(raw) => {
-                        let expanded = crate::path_safety::expand_home(&raw)?;
-                        if !std::path::Path::new(&expanded).is_absolute() {
-                            // Message copied from upstream
-                            // local_connection_config.py:112.
-                            return Err(anyhow!(
-                                "app_data_dir must be an absolute path, got '{raw}'"
-                            ));
-                        }
-                        crate::path_safety::secure_normalize_path(&expanded)
-                            .map_or(expanded, |p| p.to_string_lossy().into_owned())
-                    }
-                    // No /tmp fallback: granting a workspace root under a
-                    // world-writable directory when HOME is unset is worse than
-                    // refusing to start, and after the path-resolution fix a
-                    // pre-planted symlink there would be followed faithfully.
-                    None => crate::path_safety::default_app_data_dir()?
-                        .to_string_lossy()
-                        .into_owned(),
-                };
-                let mut allowed_paths = workspaces.clone();
-                allowed_paths.push(app_data_dir);
-                let mut ws_policies = policy::workspace_only(allowed_paths);
-                ws_policies.append(&mut final_policies);
-                final_policies = ws_policies;
-            }
+            let final_policies = compose_policies(
+                self.config.policies.clone(),
+                &workspaces,
+                self.config.app_data_dir.as_deref(),
+            )?;
 
             // Safety policy check: if write tools are enabled, policies cannot be empty
             if has_write_tools && final_policies.is_empty() {
@@ -639,6 +596,74 @@ impl AgentBuilder<HasPolicies> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Builds the effective policy list for an agent.
+///
+/// Extracted from `Agent::start` so the composition can be tested without a
+/// harness binary: `start()` resolves the binary first, which would otherwise
+/// make every one of these rules unreachable in a unit test.
+///
+/// * `configured` — the caller's policies, or `None` for the default
+///   `confirm_run_command(None)`.
+/// * `workspaces` — already resolved and normalized (see [`crate::workspace`]).
+/// * `app_data_dir` — the caller's override, or `None` for `~/.gemini/antigravity`.
+///
+/// # Errors
+///
+/// Returns an error when `app_data_dir` is relative, uses an unsupported
+/// `~user` form, or is defaulted while the home directory is unknown.
+fn compose_policies(
+    configured: Option<Vec<Policy>>,
+    workspaces: &[String],
+    app_data_dir: Option<&str>,
+) -> Result<Vec<Policy>, anyhow::Error> {
+    let mut final_policies = configured.unwrap_or_else(|| policy::confirm_run_command(None));
+
+    // Workspace scoping is applied unconditionally, matching upstream's
+    // model-validator (local_connection_config.py:130-141 at 0.1.1, :112-133 at
+    // 0.1.9). It used to be skipped whenever the policy set contained
+    // `allow_all()` — which is what the README, the crate docs and every
+    // example recommend — so the default posture was less sandboxed than
+    // upstream's. Upstream documents `allow_all()` as the way to get autonomous
+    // shell access *while* file tools stay scoped; the opt-out is
+    // `workspaces(vec![])`, not a policy name.
+    //
+    // Drop any workspace_only policies already present first, so re-application
+    // cannot stack duplicate DENY rules (0.1.9 :114-118). This runs
+    // unconditionally, so `workspaces(vec![])` also strips a hand-passed
+    // workspace_only group — upstream's semantics.
+    final_policies.retain(|p| p.name != "workspace_only");
+
+    if !workspaces.is_empty() {
+        let app_data_dir = match app_data_dir {
+            Some(raw) => {
+                let expanded = crate::path_safety::expand_home(raw)?;
+                if !std::path::Path::new(&expanded).is_absolute() {
+                    // Message copied from upstream local_connection_config.py:112.
+                    return Err(anyhow!(
+                        "app_data_dir must be an absolute path, got '{raw}'"
+                    ));
+                }
+                crate::path_safety::secure_normalize_path(&expanded)
+                    .map_or(expanded, |p| p.to_string_lossy().into_owned())
+            }
+            // No /tmp fallback: granting a workspace root under a
+            // world-writable directory when HOME is unset is worse than
+            // refusing to start, and after the path-resolution fix a
+            // pre-planted symlink there would be followed faithfully.
+            None => crate::path_safety::default_app_data_dir()?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut allowed_paths = workspaces.to_vec();
+        allowed_paths.push(app_data_dir);
+        let mut ws_policies = policy::workspace_only(allowed_paths);
+        ws_policies.append(&mut final_policies);
+        final_policies = ws_policies;
+    }
+
+    Ok(final_policies)
+}
+
 fn get_default_binary_path() -> Option<String> {
     if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         return Some(path);
@@ -688,4 +713,133 @@ fn get_default_binary_path() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::policy::Decision;
+
+    fn names(policies: &[Policy]) -> Vec<(&str, &str, Decision)> {
+        policies
+            .iter()
+            .map(|p| (p.name.as_str(), p.tool.as_str(), p.decision))
+            .collect()
+    }
+
+    fn workspace_denies(policies: &[Policy]) -> Vec<&str> {
+        policies
+            .iter()
+            .filter(|p| p.name == "workspace_only")
+            .map(|p| p.tool.as_str())
+            .collect()
+    }
+
+    /// The regression this whole item exists for: `allow_all()` used to skip
+    /// workspace scoping entirely, which is what the README, the crate docs and
+    /// every example recommend — so the default posture was less sandboxed than
+    /// upstream's. Upstream applies scoping unconditionally and documents
+    /// `allow_all()` as autonomous shell access *with* file tools still scoped.
+    #[test]
+    fn allow_all_still_gets_workspace_scoping() {
+        let composed = compose_policies(
+            Some(vec![policy::allow_all()]),
+            &["/ws".to_string()],
+            Some("/app-data"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            workspace_denies(&composed),
+            crate::types::BuiltinTools::path_scoped_tools()
+                .iter()
+                .map(BuiltinTools::as_str)
+                .collect::<Vec<_>>(),
+        );
+        // The caller's own policies survive, and follow the DENY prefix so the
+        // bucket ordering still resolves in their favour for unscoped tools.
+        assert_eq!(composed.last().map(|p| p.name.as_str()), Some("allow_all"));
+    }
+
+    /// `workspaces(vec![])` is upstream's documented opt-out — the only one.
+    #[test]
+    fn empty_workspace_list_is_the_opt_out() {
+        let composed =
+            compose_policies(Some(vec![policy::allow_all()]), &[], Some("/app-data")).unwrap();
+        assert!(workspace_denies(&composed).is_empty());
+        assert_eq!(
+            names(&composed),
+            vec![("allow_all", "*", Decision::Approve)]
+        );
+    }
+
+    /// Re-application must not stack duplicate DENY rules (upstream 0.1.9
+    /// local_connection_config.py:114-118).
+    #[test]
+    fn workspace_policies_are_not_stacked() {
+        let mut configured = policy::workspace_only(vec!["/old".to_string()]);
+        configured.push(policy::allow_all());
+
+        let composed =
+            compose_policies(Some(configured), &["/ws".to_string()], Some("/app-data")).unwrap();
+
+        assert_eq!(
+            workspace_denies(&composed).len(),
+            crate::types::BuiltinTools::path_scoped_tools().len(),
+            "a pre-existing workspace_only group must be replaced, not appended to"
+        );
+    }
+
+    /// Upstream `local_connection_config.py:109-113` rejects a relative
+    /// `app_data_dir` with this exact message.
+    #[test]
+    fn relative_app_data_dir_is_rejected() {
+        let err = compose_policies(None, &["/ws".to_string()], Some("relative/dir"))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("must be an absolute path"), "{err}");
+    }
+
+    #[test]
+    fn tilde_user_app_data_dir_is_rejected() {
+        assert!(compose_policies(None, &["/ws".to_string()], Some("~someone/x")).is_err());
+    }
+
+    /// The `app_data_dir` joins the workspace allow-list, so the agent can reach
+    /// its own state directory (upstream :122-127).
+    #[test]
+    fn app_data_dir_joins_the_allowlist() {
+        let composed = compose_policies(None, &["/ws".to_string()], Some("/app-data")).unwrap();
+        let scoped = composed
+            .iter()
+            .find(|p| p.name == "workspace_only" && p.tool == "VIEW_FILE")
+            .and_then(|p| p.when.clone())
+            .unwrap();
+
+        let inside_app_data = crate::types::ToolCall {
+            id: "1".to_string(),
+            name: "VIEW_FILE".to_string(),
+            args: serde_json::json!({}),
+            canonical_path: Some("/app-data/state.json".to_string()),
+        };
+        // `when` is "is outside the workspace", so false means allowed.
+        assert!(!scoped(&inside_app_data));
+
+        let elsewhere = crate::types::ToolCall {
+            canonical_path: Some("/etc/passwd".to_string()),
+            ..inside_app_data
+        };
+        assert!(scoped(&elsewhere));
+    }
+
+    /// With no policies configured at all, the default is still scoped.
+    #[test]
+    fn default_policies_are_scoped_too() {
+        let composed = compose_policies(None, &["/ws".to_string()], Some("/app-data")).unwrap();
+        assert!(!workspace_denies(&composed).is_empty());
+        assert!(composed.iter().any(|p| p.name == "confirm_run_command"));
+    }
 }
