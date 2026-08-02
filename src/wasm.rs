@@ -153,7 +153,7 @@ impl WasmConnectionStrategy {
         let mut proto_tools = Vec::new();
         if let Some(ref runner) = self.tool_runner {
             let tools = runner.tools.read().await;
-            for t in tools.values() {
+            for t in tools.iter() {
                 proto_tools.push(ProtoTool {
                     name: Some(t.name().to_string()),
                     description: Some(t.description().to_string()),

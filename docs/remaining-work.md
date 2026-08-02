@@ -89,9 +89,9 @@ batch into one release, and wire-neutral upstream API corrections are in scope.
 | H1b | Dispatch `post_turn`; parameter → `&str` | S |
 | H1d+H16 | Dispatch `on_compaction`; parameter → `&Step` | XS |
 | ~~A2~~ | **Done** — per-turn and `Option`; the session total stays on `Conversation::total_usage` | XS |
-| T7+T8 | Reject duplicate tool names; insertion-ordered registry | S |
+| ~~T7+T8~~ | **Done** — duplicate names error from `Agent::start()`; the registry is a `Vec`, so order is registration order | S |
 | T4 | Coerce model-supplied arguments against the tool's JSON Schema | M |
-| T10 | Execute a tool-call batch concurrently | S |
+| ~~T10~~ | **Done** — the batch joins, and the registry lock is released before any tool body runs | S |
 | X19 | Exercise context-aware tools in an example and tests | S |
 | A11 | `every()` invokes a callback and rejects a non-positive interval | S |
 | ~~finish-extractor~~ | **Done** — `FINISH` classifies as a tool call, so the one call that ends a turn is finally visible to policies and hooks | XS |
@@ -198,7 +198,7 @@ maintainer's §8.3 decisions both assume one break, not several.
 | ~~D1~~ | Fail-closed gating — **done** | S2 | S |
 | D2 | Tool result shape | T6, H11, `tool-wire`, T5, W8 | M |
 | D3 | `on_tool_error` contract | H4 + the six documents that teach the old behaviour | M |
-| D4 | Tool runner | T7+T8, T4, T10, `finish-extractor` | M |
+| D4 | Tool runner — **T7+T8, T10, `finish-extractor` done**; T4 (schema coercion) remains | T7+T8, T4, T10, `finish-extractor` | M |
 | D5 | `ToolContext` | T1+T9, `tool-context-state-atomicity`, X19 | M |
 | D6 | Triggers | A10, A1, A11 | M |
 | ~~D7~~ | Per-turn response — **done** | A2, `chatresponse-per-turn-steps` | XS |

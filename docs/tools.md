@@ -238,3 +238,20 @@ impl Tool for InventoryTool {
 | `ToolRunner.execute()` | `ToolRunner::execute()` |
 | `ToolContext` with `get_state`/`set_state` | `ToolContext` with `get_state`/`set_state` |
 | Sync/async auto-detection | All tools are async |
+
+## Names must be unique
+
+Registering two tools with the same name is an error, surfaced from
+`Agent::start()`. Silently replacing the first — the old behaviour — meant a
+collision between two modules' tools resolved to whichever registered last, and
+the model called something the caller never meant to expose.
+
+Registration order is preserved, and it is the order the tool list reaches the
+model in.
+
+## A batch runs concurrently
+
+When the model asks for several tools at once, they execute concurrently and
+the batch takes as long as its slowest member rather than the sum. Results come
+back in call order regardless of which finished first. Tools that share mutable
+state need their own synchronisation.

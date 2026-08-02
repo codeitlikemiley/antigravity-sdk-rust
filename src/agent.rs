@@ -324,7 +324,7 @@ impl Agent<Unstarted> {
 
             // 5. Register configured tools
             for tool in &self.config.tools {
-                self.tool_runner.register(tool.clone()).await;
+                self.tool_runner.register(tool.clone()).await?;
             }
 
             // 6. Build and connect strategy
