@@ -1,0 +1,6 @@
+interface:
+  display_name: "Antigravity Sdk Rust"
+  short_description: "Repo-specific patterns and workflows for antigravity-sdk-rust"
+  default_prompt: "Use the antigravity-sdk-rust repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,431 @@
+# Instincts generated from https://github.com/codeitlikemiley/antigravity-sdk-rust
+# Generated: 2026-06-07T19:51:39.159Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: antigravity-sdk-rust-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, docs
+
+## Evidence
+
+- 6 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat: add core types for Python SDK parity, docs: document all new features in README
+
+---
+id: antigravity-sdk-rust-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Commit Length
+
+## Action
+
+Write moderate-length commit messages (~51 characters)
+
+## Evidence
+
+- Average commit message length: 51 chars
+- Based on 6 commits
+
+---
+id: antigravity-sdk-rust-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: antigravity-sdk-rust-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: antigravity-sdk-rust-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: antigravity-sdk-rust-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: antigravity-sdk-rust-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~30x per month
+- Files: **/*.test.*
+
+---
+id: antigravity-sdk-rust-workflow-feature-implementation-and-wiring
+trigger: "when doing feature implementation and wiring"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Workflow Feature Implementation And Wiring
+
+## Action
+
+Follow the feature-implementation-and-wiring workflow:
+1. Create or update one or more module files in src/ (e.g., context.rs, error.rs, tool_context.rs, trigger_helpers.rs, interactive.rs)
+2. Update src/lib.rs to wire in the new modules
+3. Optionally, update or create related trait or struct files (e.g., hooks.rs, tools.rs)
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/*.rs, src/lib.rs
+
+---
+id: antigravity-sdk-rust-workflow-documentation-update-after-feature
+trigger: "when doing documentation update after feature"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Workflow Documentation Update After Feature
+
+## Action
+
+Follow the documentation-update-after-feature workflow:
+1. Update or create relevant docs/*.md files for new or changed components
+2. Add or update sections in README.md to reflect new features or changes
+3. Add cross-links or summary sections in README.md for discoverability
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: README.md, docs/*.md
+
+---
+id: antigravity-sdk-rust-instinct-file-naming
+trigger: "When creating a new Rust source file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct File Naming
+
+## Action
+
+Name the file using camelCase (e.g., toolContext.rs)
+
+## Evidence
+
+- Pattern in files: src/context.rs, src/tool_context.rs
+
+---
+id: antigravity-sdk-rust-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in src/*.rs function definitions
+
+---
+id: antigravity-sdk-rust-instinct-class-naming
+trigger: "When defining a new struct or enum"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Class Naming
+
+## Action
+
+Name the type using PascalCase
+
+## Evidence
+
+- Pattern in src/*.rs: struct Context, enum Error
+
+---
+id: antigravity-sdk-rust-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in src/*.rs: const MAX_SIZE: usize = ...
+
+---
+id: antigravity-sdk-rust-instinct-import-style
+trigger: "When importing modules within the crate"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in src/*.rs: use super::module;
+
+---
+id: antigravity-sdk-rust-instinct-export-style
+trigger: "When exporting modules or items"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in src/lib.rs: pub mod context;
+
+---
+id: antigravity-sdk-rust-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Test Location
+
+## Action
+
+Place test files in the separate tests/ directory
+
+## Evidence
+
+- Pattern in folder structure: tests/
+
+---
+id: antigravity-sdk-rust-instinct-test-pattern
+trigger: "When writing tests for a new feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Test Pattern
+
+## Action
+
+Create a corresponding test file in tests/ with a .test.rs suffix
+
+## Evidence
+
+- Workflow: feature-development, filesInvolved: **/*.test.*
+
+---
+id: antigravity-sdk-rust-instinct-git-commit-format
+trigger: "When creating a commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Git Commit Format
+
+## Action
+
+Use conventional commit format with 'feat' or 'docs' prefix and a concise message (average 51 characters)
+
+## Evidence
+
+- Seen in commit: feat: add core types for Python SDK parity
+- Seen in commit: docs: document all new features in README
+
+---
+id: antigravity-sdk-rust-instinct-feature-implementation-wiring
+trigger: "When adding a new core feature or module to the SDK"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Feature Implementation Wiring
+
+## Action
+
+Create or update module files in src/, update src/lib.rs to wire in the new modules, and optionally update related trait/struct files
+
+## Evidence
+
+- Workflow: feature-implementation-and-wiring
+- Example files: src/context.rs, src/lib.rs
+
+---
+id: antigravity-sdk-rust-instinct-documentation-update
+trigger: "When a new feature or module is added"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Documentation Update
+
+## Action
+
+Update or create docs/*.md files and update README.md to reflect the changes
+
+## Evidence
+
+- Workflow: documentation-update-after-feature
+- Example files: README.md, docs/*.md
+
+---
+id: antigravity-sdk-rust-instinct-feature-dev-sequence
+trigger: "When developing a new feature"
+confidence: 0.8
+domain: workflow
+source: repo-analysis
+source_repo: codeitlikemiley/antigravity-sdk-rust
+---
+
+# Antigravity Sdk Rust Instinct Feature Dev Sequence
+
+## Action
+
+First implement the feature, then add tests, then update documentation
+
+## Evidence
+
+- Workflow: feature-development
+- Commit sequence: Add feature implementation → Add tests → Update documentation
+
